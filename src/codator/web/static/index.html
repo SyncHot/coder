@@ -137,6 +137,18 @@
             </div>
             <div id="agent-result" style="margin-top:0.8rem"></div>
         </div>
+
+        <div class="card">
+            <h2>💬 Chat</h2>
+            <div id="chat-messages" style="max-height:400px;overflow-y:auto;margin-bottom:0.8rem;padding:0.5rem;background:var(--bg);border-radius:6px;border:1px solid var(--border)">
+                <div style="color:#8b949e;font-style:italic">Start chatting with codator...</div>
+            </div>
+            <div class="input-group">
+                <input type="text" id="chat-input" placeholder="Type a message..." style="flex:2" onkeydown="if(event.key==='Enter')sendChat()">
+                <button onclick="sendChat()" id="chat-btn">Send</button>
+                <button onclick="clearChat()" style="background:var(--border);color:var(--text)">Clear</button>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -325,6 +337,87 @@
                 div.innerHTML = html;
             } catch(e) { div.innerHTML = '<p style="color:var(--red)">Agent failed: ' + e.message + '</p>'; }
             btn.disabled = false; btn.textContent = 'Run Agent';
+        }
+
+        // Chat panel
+        function appendChatMessage(role, content) {
+            const div = document.getElementById('chat-messages');
+            const el = document.createElement('div');
+            el.style.cssText = 'margin-bottom:0.6rem;padding:0.4rem 0.6rem;border-radius:6px;';
+            if (role === 'user') {
+                el.style.background = '#1f2937';
+                el.style.borderLeft = '3px solid var(--accent)';
+                el.innerHTML = `<span style="font-size:0.8rem;color:var(--accent);font-weight:600">you</span><div style="margin-top:0.2rem;white-space:pre-wrap">${escapeHtml(content)}</div>`;
+            } else {
+                el.style.background = '#1a2332';
+                el.style.borderLeft = '3px solid var(--green)';
+                el.innerHTML = `<span style="font-size:0.8rem;color:var(--green);font-weight:600">codator</span><div style="margin-top:0.2rem;white-space:pre-wrap" class="assistant-msg"></div>`;
+            }
+            div.appendChild(el);
+            div.scrollTop = div.scrollHeight;
+            return el;
+        }
+        function escapeHtml(text) {
+            const d = document.createElement('div');
+            d.textContent = text;
+            return d.innerHTML;
+        }
+        async function sendChat() {
+            const input = document.getElementById('chat-input');
+            const msg = input.value.trim();
+            if (!msg) return;
+            input.value = '';
+            const btn = document.getElementById('chat-btn');
+            btn.disabled = true;
+            // Remove placeholder
+            const container = document.getElementById('chat-messages');
+            if (container.querySelector('[style*="font-style:italic"]')) {
+                container.innerHTML = '';
+            }
+            appendChatMessage('user', msg);
+            const el = appendChatMessage('assistant', '');
+            const contentDiv = el.querySelector('.assistant-msg');
+            let fullText = '';
+            try {
+                const resp = await fetch('/api/chat/stream', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message: msg})
+                });
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, {stream: true});
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const payload = line.slice(6).trim();
+                        if (payload === '[DONE]') continue;
+                        try {
+                            const data = JSON.parse(payload);
+                            if (data.token) {
+                                fullText += data.token;
+                                contentDiv.textContent = fullText;
+                                container.scrollTop = container.scrollHeight;
+                            }
+                            if (data.error) {
+                                contentDiv.innerHTML = `<span style="color:var(--red)">${escapeHtml(data.error)}</span>`;
+                            }
+                        } catch(e) {}
+                    }
+                }
+            } catch(e) {
+                contentDiv.innerHTML = `<span style="color:var(--red)">Connection error: ${escapeHtml(e.message)}</span>`;
+            }
+            btn.disabled = false;
+            refresh();
+        }
+        function clearChat() {
+            document.getElementById('chat-messages').innerHTML = '<div style="color:#8b949e;font-style:italic">Start chatting with codator...</div>';
         }
     </script>
 </body>

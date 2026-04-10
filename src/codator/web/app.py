@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 if TYPE_CHECKING:
     from codator.core.chat_engine import ChatEngine
@@ -116,6 +116,37 @@ def _register_routes(app: FastAPI):
             "model": result.model_name,
             "context": _engine.context_status,
         }
+
+    @app.post("/api/chat/stream")
+    async def chat_stream(request: Request):
+        """SSE streaming chat endpoint."""
+        import json as json_mod
+
+        data = await request.json()
+        message = data.get("message", "")
+        if not message:
+            return JSONResponse(
+                {"error": "message required"}, status_code=400,
+            )
+
+        async def event_generator():
+            try:
+                async for token in _engine.chat_stream(message):
+                    payload = json_mod.dumps({"token": token})
+                    yield f"data: {payload}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as exc:
+                err = json_mod.dumps({"error": str(exc)})
+                yield f"data: {err}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.post("/api/index")
     async def reindex():
