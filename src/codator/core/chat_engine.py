@@ -41,7 +41,7 @@ from codator.infrastructure.tools.web_tools import WebFetchTool, WebSearchTool
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ITERATIONS = 5
+MAX_TOOL_ITERATIONS = 15
 
 # Type for the user confirmation callback used by write/edit tools
 ConfirmCallback = Callable[[str, str], Awaitable[bool]]
@@ -408,9 +408,16 @@ class ChatEngine:
         self._context.add_message(assistant_msg)
 
     async def _agentic_chat_stream(self) -> AsyncIterator[str]:
-        """Agentic loop: generate → detect tool calls → execute → re-generate."""
+        """Agentic loop: generate → detect tool calls → execute → re-generate.
+
+        Uses a nudge-then-break strategy for loop detection:
+        1. First duplicate → gentle nudge asking model to explore deeper
+        2. Second consecutive duplicate → force a text answer
+        This allows models to self-correct instead of being killed mid-analysis.
+        """
         tools_defs = self._tools.to_openai_tools()
-        seen_calls: set[str] = set()  # Track (tool_name, params) to detect loops
+        seen_calls: set[str] = set()
+        nudge_count = 0  # consecutive nudges without progress
 
         for _iteration in range(MAX_TOOL_ITERATIONS):
             # Non-streaming call with tool support
@@ -438,13 +445,31 @@ class ChatEngine:
                 self._context.add_message(assistant_msg)
                 return
 
-            # Detect repeated tool calls (loop prevention)
-            # Normalize paths in parameters to catch ./ vs .// vs ./// etc.
+            # --- Sanitize tool params: some models pass schema dicts instead of values ---
+            for tc in tool_calls:
+                sanitized = {}
+                for k, v in tc.parameters.items():
+                    if isinstance(v, dict) and "type" in v and "description" in v:
+                        # Model passed the JSON schema instead of a value — use a
+                        # sensible default based on the param name and type.
+                        if k == "path":
+                            v = "."
+                        elif v.get("type") == "string":
+                            v = ""
+                        else:
+                            v = ""
+                        logger.warning(
+                            "Sanitized schema-as-value param %s in tool %s",
+                            k, tc.tool_name,
+                        )
+                    sanitized[k] = v
+                tc.parameters = sanitized
+
+            # --- Loop detection (nudge-then-break) ---
             def _normalize_params(params: dict) -> dict:
                 normalized = {}
                 for k, v in params.items():
                     if isinstance(v, str) and ("/" in v or v == "."):
-                        # Normalize path-like values
                         v = os.path.normpath(v)
                     normalized[k] = v
                 return normalized
@@ -455,50 +480,36 @@ class ChatEngine:
             )
             new_calls = call_keys - seen_calls
 
-            # Also detect same-tool repetition: if the model has called the
-            # same tool name 3+ times (even with different params), and the
-            # latest call returns the same result, it's likely looping.
-            same_tool_count = sum(
-                1 for sc in seen_calls
-                if sc.split(":", 1)[0] in {tc.tool_name for tc in tool_calls}
-            )
-
-            if not new_calls or same_tool_count >= 3:
-                # All calls are repeats — force a text response
-                logger.warning("Loop detected: model repeating same tool calls, forcing answer")
-                force_msg = Message(
+            if not new_calls:
+                nudge_count += 1
+                if nudge_count >= 2:
+                    # Repeated duplicates after nudge — force text answer
+                    logger.warning("Loop detected after nudge, forcing text answer")
+                    async for chunk in self._force_text_answer():
+                        yield chunk
+                    return
+                # First duplicate — nudge the model to try different tools/paths
+                logger.info("Duplicate tool calls detected, nudging model (attempt %d)", nudge_count)
+                already_called = ", ".join(
+                    f"{k.split(':', 1)[0]}({k.split(':', 1)[1][:60]})"
+                    for k in seen_calls
+                )
+                nudge_msg = Message(
                     role=Role.USER,
                     content=(
-                        "[System]: You already called these tools with the same arguments. "
-                        "STOP calling tools NOW. Provide your final answer in plain text "
-                        "based on the information you have gathered. Do NOT output JSON. "
-                        "Respond in the same language as the user's original question."
+                        f"[System]: You already called these tools: {already_called}. "
+                        "Do NOT repeat them. Instead, try a DIFFERENT approach:\n"
+                        "- Use read_file to look at specific files (e.g. README.md, main config files)\n"
+                        "- Use list_directory on subdirectories to explore deeper\n"
+                        "- Use terminal to run 'find' or 'grep' for specific patterns\n"
+                        "Choose a different tool or different arguments now."
                     ),
                 )
-                self._context.add_message(force_msg)
-                # One more generation without tools to force text
-                final = await self._backend.generate(
-                    self._context.get_messages(),
-                    max_tokens=self._settings.inference.max_tokens,
-                    temperature=0.7,
-                )
-                text = final.text or ""
-                # Strip any remaining JSON tool calls from the response
-                text = re.sub(
-                    r'```json\s*\{[^}]*"name"\s*:.*?\}.*?```',
-                    "", text, flags=re.DOTALL,
-                ).strip()
-                if not text:
-                    text = (
-                        "I analyzed the available information but could not find "
-                        "the specific file or module. Could you clarify which "
-                        "part of the project you mean?"
-                    )
-                yield text
-                self._context.add_message(
-                    Message(role=Role.ASSISTANT, content=text)
-                )
-                return
+                self._context.add_message(nudge_msg)
+                continue  # Let the model try again
+            else:
+                nudge_count = 0  # reset on progress
+
             seen_calls.update(call_keys)
 
             # Model wants to call tools — store assistant message with tool_calls metadata
@@ -548,6 +559,39 @@ class ChatEngine:
 
         # Safety: if we hit max iterations
         yield "\n⚠️ Reached maximum tool iterations.\n"
+
+    async def _force_text_answer(self) -> AsyncIterator[str]:
+        """Force the model to produce a text-only answer (no tools)."""
+        force_msg = Message(
+            role=Role.USER,
+            content=(
+                "[System]: STOP calling tools. Provide your final answer in plain text "
+                "based on all the information you have gathered so far. "
+                "Do NOT output JSON or tool calls. "
+                "Respond in the same language as the user's original question."
+            ),
+        )
+        self._context.add_message(force_msg)
+        final = await self._backend.generate(
+            self._context.get_messages(),
+            max_tokens=self._settings.inference.max_tokens,
+            temperature=0.7,
+        )
+        text = final.text or ""
+        text = re.sub(
+            r'```json\s*\{[^}]*"name"\s*:.*?\}.*?```',
+            "", text, flags=re.DOTALL,
+        ).strip()
+        if not text:
+            text = (
+                "I analyzed the available information but could not find "
+                "the specific file or module. Could you clarify which "
+                "part of the project you mean?"
+            )
+        yield text
+        self._context.add_message(
+            Message(role=Role.ASSISTANT, content=text)
+        )
 
     @staticmethod
     def _parse_text_tool_calls(text: str) -> list[ToolCall]:
