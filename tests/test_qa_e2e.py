@@ -60,8 +60,8 @@ class TestAgentPlanParsing:
         assert plan.steps[0].action == "read_file"
         assert plan.steps[1].action == "edit_file"
 
-    def test_parse_plan_invalid_action_raises(self, agent):
-        """Invalid actions should raise ValueError."""
+    def test_parse_plan_invalid_action_skipped(self, agent):
+        """Invalid actions should be silently skipped, not raise."""
         raw = json.dumps({
             "task": "Do something",
             "reasoning": "testing",
@@ -73,8 +73,10 @@ class TestAgentPlanParsing:
             ],
         })
 
-        with pytest.raises(ValueError, match="Invalid action"):
-            agent._parse_plan(raw, "Do something")
+        plan = agent._parse_plan(raw, "Do something")
+        # Only the valid step should remain
+        assert len(plan.steps) == 1
+        assert plan.steps[0].action == "read_file"
 
     def test_parse_plan_empty_steps(self, agent):
         """Plan with empty steps should not crash."""
@@ -86,6 +88,43 @@ class TestAgentPlanParsing:
 
         plan = agent._parse_plan(raw, "Nothing to do")
         assert len(plan.steps) == 0
+
+    def test_parse_plan_field_aliases(self, agent):
+        """Steps with non-standard field names should still be parsed."""
+        raw = json.dumps({
+            "task": "Fix code",
+            "reasoning": "testing",
+            "steps": [
+                {"command": "read_file", "path": "src/main.py",
+                 "details": "Read the main file"},
+                {"task": "analyze", "file": "src/utils.py",
+                 "reasoning": "Check for bugs"},
+            ],
+        })
+        plan = agent._parse_plan(raw, "Fix code")
+        assert len(plan.steps) == 2
+        assert plan.steps[0].action == "read_file"
+        assert plan.steps[0].target == "src/main.py"
+        assert plan.steps[0].description == "Read the main file"
+        assert plan.steps[1].action == "analyze"
+        assert plan.steps[1].target == "src/utils.py"
+
+    def test_parse_plan_action_aliases(self, agent):
+        """Common action name variants should be normalised."""
+        raw = json.dumps({
+            "task": "Review",
+            "reasoning": "testing",
+            "steps": [
+                {"action": "review", "target": "a.py", "description": "Review code"},
+                {"action": "search", "target": "def main", "description": "Find function"},
+                {"action": "install", "target": "pip install flask", "description": "Install"},
+            ],
+        })
+        plan = agent._parse_plan(raw, "Review")
+        assert len(plan.steps) == 3
+        assert plan.steps[0].action == "analyze"
+        assert plan.steps[1].action == "grep"
+        assert plan.steps[2].action == "run_command"
 
     def test_parse_plan_malformed_json(self, agent):
         """Malformed JSON should raise JSONDecodeError."""

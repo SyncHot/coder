@@ -247,15 +247,26 @@ Rules:
 _HEAL_SYSTEM = """\
 You are a coding assistant that fixes errors.
 Given the original task, the errors encountered, and optional project context,
-produce a new JSON plan to fix the errors. Use the same JSON schema as the
-planning phase:
+produce a new JSON plan to fix the errors.
+
+You MUST use this exact JSON schema:
 {
   "task": "<fix description>",
   "reasoning": "<what went wrong and how to fix>",
-  "steps": [...]
+  "steps": [
+    {"action": "read_file", "target": "path/to/file.py", "description": "Read file before editing"},
+    {"action": "edit_file", "target": "path/to/file.py", "description": "{\"file\":\"path/to/file.py\",\"old\":\"old text\",\"new\":\"new text\"}"},
+    {"action": "run_command", "target": "chmod u+rw path/to/file.py", "description": "Fix permissions"},
+    {"action": "grep", "target": "pattern", "description": "Search for code"},
+    {"action": "analyze", "target": "path/to/file.py", "description": "Analyze code"}
+  ]
 }
 
-Return ONLY valid JSON, no markdown fences.
+CRITICAL RULES:
+- Each step MUST have "action", "target", and "description" fields.
+- Valid actions: read_file, edit_file, create_file, run_command, delete_file, analyze, grep, glob.
+- ALWAYS read_file before edit_file.
+- Return ONLY valid JSON, no markdown fences.
 """
 
 _PROPOSE_SYSTEM = """\
@@ -433,32 +444,95 @@ class PlanActVerifyAgent:
 
     @staticmethod
     def _parse_plan(raw: str, task: str) -> AgentPlan:
-        """Parse JSON response into an AgentPlan, validating actions."""
+        """Parse JSON response into an AgentPlan, validating actions.
+
+        Tolerant of LLM field naming variations — small models often use
+        'command', 'task', 'details' etc. instead of the canonical
+        'action', 'target', 'description'.
+        """
         obj = safe_parse_json(raw)
         steps: list[AgentStep] = []
         for i, s in enumerate(obj.get("steps", [])):
-            action = (
-                s.get("action", "") or s.get("step", "")
-            ).strip().lower()
+            # --- Extract action (try many field names) ---
+            action = ""
+            for key in ("action", "step", "command", "task", "type",
+                        "operation", "tool"):
+                val = s.get(key, "")
+                if val and isinstance(val, str):
+                    candidate = val.strip().lower()
+                    # Only accept if it's a short action-like value,
+                    # not a prose sentence (those are descriptions)
+                    if len(candidate.split()) <= 3:
+                        action = candidate
+                        break
+
             # Normalise common LLM aliases to valid actions
             _action_aliases = {
                 "install": "run_command",
                 "open": "read_file",
-                "locate": "read_file",
+                "locate": "grep",
+                "find": "glob",
+                "search": "grep",
                 "review": "analyze",
+                "check": "analyze",
+                "inspect": "analyze",
+                "examine": "analyze",
+                "look": "read_file",
+                "view": "read_file",
+                "modify": "edit_file",
+                "update": "edit_file",
+                "change": "edit_file",
+                "write": "create_file",
+                "remove": "delete_file",
+                "execute": "run_command",
+                "shell": "run_command",
                 "save": "",  # skip no-op steps
                 "commit": "",
+                "navigate": "",
+                "ensure": "",
+                "verify permissions": "",
+                "check test environment": "",
+                "update dependencies": "",
             }
             action = _action_aliases.get(action, action)
+
+            # If still no valid action, try inferring from prose fields
+            if not action or action not in VALID_ACTIONS:
+                inferred = PlanActVerifyAgent._infer_action_from_prose(s)
+                if inferred:
+                    action = inferred
+
             if not action or action not in VALID_ACTIONS:
                 logger.warning("Skipping step %d with invalid action: %r", i, action)
                 continue
+
+            # --- Extract target (try many field names) ---
+            target = ""
+            for key in ("target", "path", "file", "file_path", "filename",
+                        "pattern", "cmd", "directory"):
+                val = s.get(key, "")
+                if val and isinstance(val, str):
+                    target = val
+                    break
+            # Fallback: extract file path from any field value
+            if not target:
+                target = PlanActVerifyAgent._extract_path_from_step(s)
+
+            # --- Extract description (try many field names) ---
+            description = ""
+            for key in ("description", "details", "reasoning", "solution",
+                        "explanation", "info", "what", "summary"):
+                val = s.get(key, "")
+                if val and isinstance(val, str):
+                    description = val
+                    break
+
             steps.append(
                 AgentStep(
                     index=i,
                     action=action,
-                    target=s.get("target", ""),
-                    description=s.get("description", ""),
+                    target=target,
+                    description=description,
                 )
             )
         return AgentPlan(
@@ -466,6 +540,54 @@ class PlanActVerifyAgent:
             steps=steps,
             reasoning=obj.get("reasoning", ""),
         )
+
+    @staticmethod
+    def _infer_action_from_prose(step_dict: dict) -> str:
+        """Try to infer a valid action from prose text in step fields.
+
+        Small models often put descriptions in 'command' or 'task' fields
+        instead of action names. This tries to extract a verb and map it.
+        """
+        import re
+        # Gather all string values from the step
+        texts = [v for v in step_dict.values() if isinstance(v, str)]
+        combined = " ".join(texts).lower()
+
+        _verb_map = [
+            (r"\bread\b", "read_file"),
+            (r"\banalyze\b|\banalysis\b|\breview\b|\bcheck\b|\binspect\b", "analyze"),
+            (r"\bgrep\b|\bsearch\b|\bfind occurrences\b", "grep"),
+            (r"\bglob\b|\bfind files\b|\blist files\b", "glob"),
+            (r"\bedit\b|\bmodify\b|\bchange\b|\bupdate\b|\breplace\b|\brefactor\b", "edit_file"),
+            (r"\bcreate\b|\bwrite new\b", "create_file"),
+            (r"\bdelete\b|\bremove file\b", "delete_file"),
+            (r"\brun\b|\bexecute\b|\binstall\b|\bchmod\b|\bpip\b|\bnpm\b", "run_command"),
+        ]
+        for pattern, action in _verb_map:
+            if re.search(pattern, combined):
+                return action
+        return ""
+
+    @staticmethod
+    def _extract_path_from_step(step_dict: dict) -> str:
+        """Try to extract a file path from any field in a step dict."""
+        import re
+        for val in step_dict.values():
+            if not isinstance(val, str):
+                continue
+            # Match patterns like backend/file.py, src/module/file.ts
+            m = re.search(
+                r'(?:^|[\s`\'"])([a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5})\b', val
+            )
+            if m:
+                path = m.group(1)
+                # Sanity check: must contain at least one directory separator
+                # or be a known file extension
+                if "/" in path or path.endswith((".py", ".js", ".ts", ".go",
+                                                 ".rs", ".toml", ".json",
+                                                 ".yaml", ".yml", ".md")):
+                    return path
+        return ""
 
     # -- plan ----------------------------------------------------------------
 
@@ -996,8 +1118,9 @@ class PlanActVerifyAgent:
             f"Analyze the following request (read and analyze only, NO edits):\n{task}"
         )
         await _notify("Planning analysis…", "started")
+        # Don't stream plan tokens — they're internal JSON, not user-facing text
         analysis_plan = await self.plan(
-            analysis_task, project_context, on_token=on_token,
+            analysis_task, project_context,
         )
         await _notify(
             f"Analysis plan ready — {len(analysis_plan.steps)} steps", "done"
@@ -1139,8 +1262,9 @@ class PlanActVerifyAgent:
 
         # Generate implementation plan
         await _notify("Planning implementation…", "started")
+        # Don't stream — this generates internal JSON, not user-facing text
         raw = await self._ollama_chat(
-            _IMPLEMENT_SYSTEM, impl_prompt, on_token=on_token,
+            _IMPLEMENT_SYSTEM, impl_prompt,
         )
         current_plan = self._parse_plan(raw, impl_task)
         await _notify(
@@ -1194,7 +1318,6 @@ class PlanActVerifyAgent:
                     try:
                         current_plan = await self.self_heal(
                             verification.errors, impl_task, project_context,
-                            on_token=on_token,
                         )
                         await _notify(
                             f"Heal plan — {len(current_plan.steps)} steps", "done"
@@ -1292,7 +1415,8 @@ class PlanActVerifyAgent:
         """Core agent loop (extracted for git transaction wrapping)."""
         # ---- Plan ----------------------------------------------------------
         await _notify("Planning…", "started")
-        current_plan = await self.plan(task, project_context, on_token=on_token)
+        # Don't stream plan — internal JSON, not user-facing text
+        current_plan = await self.plan(task, project_context)
         await _notify(f"Plan ready — {len(current_plan.steps)} steps", "done")
 
         all_actions: list[ActionResult] = []
@@ -1393,7 +1517,6 @@ class PlanActVerifyAgent:
                 try:
                     current_plan = await self.self_heal(
                         verification.errors, task, project_context,
-                        on_token=on_token,
                     )
                     await _notify(
                         f"Heal plan ready — {len(current_plan.steps)} steps", "done"
