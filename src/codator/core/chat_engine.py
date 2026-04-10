@@ -432,7 +432,6 @@ class ChatEngine:
                 content=result.text or "",
                 metadata={"tool_calls": raw_tool_calls},
             )
-            )
             self._context.add_message(assistant_msg)
 
             # Execute each tool and add results as user messages
