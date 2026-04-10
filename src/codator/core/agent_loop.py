@@ -91,6 +91,8 @@ Rules:
   Do NOT edit or run commands for analytical tasks.
 - The "analyze" action takes a file path as target and a description of what to
   look for. It is read-only and produces observations — no changes.
+- **Use the project file tree provided in context to find correct file paths.**
+  Never guess file paths — always refer to the actual files listed in the project context.
 - File paths must be relative to the project root.
 - For edit_file the description MUST be a JSON string:
   {"file": "path", "old": "text to find", "new": "replacement text"}
