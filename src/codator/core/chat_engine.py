@@ -153,6 +153,17 @@ class ChatEngine:
             self._contextual_index = ContextualIndex(self._project_root)
             chunk_count = await self._contextual_index.index_project()
             logger.info("Contextual index: %d chunks", chunk_count)
+            # Build embeddings if Ollama backend
+            if isinstance(self._backend, OllamaBackend):
+                try:
+                    url = self._settings.ollama.base_url
+                    embedded = await self._contextual_index.build_embeddings(
+                        model="nomic-embed-text",
+                        ollama_url=url,
+                    )
+                    logger.info("Embeddings: %d chunks", embedded)
+                except Exception as emb_exc:
+                    logger.debug("Embedding build skipped: %s", emb_exc)
         except Exception as exc:
             logger.warning("Contextual indexing failed: %s", exc)
 
@@ -308,7 +319,14 @@ class ChatEngine:
         # (keeps conversation history clean — retrieval context is not persisted)
         if self._contextual_index:
             try:
-                chunks = self._contextual_index.search(user_input, top_k=3)
+                if self._contextual_index.has_embeddings:
+                    chunks = await self._contextual_index.search_async(
+                        user_input, top_k=3,
+                    )
+                else:
+                    chunks = self._contextual_index.search(
+                        user_input, top_k=3,
+                    )
                 if chunks:
                     context_block = (
                         self._contextual_index

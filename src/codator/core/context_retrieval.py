@@ -74,7 +74,7 @@ def _tokenize(text: str) -> list[str]:
 
 class ContextualIndex:
     """Indexes a project into semantic :class:`CodeChunk` objects and supports
-    TF-IDF keyword search for retrieval-augmented generation."""
+    TF-IDF keyword search and optional embedding-based hybrid retrieval."""
 
     def __init__(self, project_root: str) -> None:
         self._root = Path(project_root).resolve()
@@ -84,6 +84,10 @@ class ContextualIndex:
         self._idf: dict[str, float] = {}
         self._tf_vectors: list[dict[str, float]] = []
         self._index_dirty = True
+
+        # Embedding structures (built lazily via build_embeddings)
+        self._embeddings: list[list[float]] = []
+        self._embedding_model: str = ""
 
         # Optional tree-sitter integration
         self._ts_available = False
@@ -170,10 +174,52 @@ class ContextualIndex:
         return len(self._chunks)
 
     def search(self, query: str, top_k: int = 5) -> list[CodeChunk]:
-        """Return the *top_k* chunks most relevant to *query* using TF-IDF."""
+        """Return the *top_k* chunks most relevant to *query*.
+
+        Uses TF-IDF by default.  When embeddings are available
+        (see :meth:`build_embeddings`), scores are fused via
+        Reciprocal Rank Fusion (RRF).
+        """
         if not self._chunks:
             return []
 
+        tfidf_ranked = self._search_tfidf(query, top_k=top_k * 2)
+
+        if not self._embeddings:
+            return tfidf_ranked[:top_k]
+
+        embed_ranked = asyncio.get_event_loop().run_until_complete(
+            self._search_embedding(query, top_k=top_k * 2),
+        ) if self._embeddings else []
+
+        if not embed_ranked:
+            return tfidf_ranked[:top_k]
+
+        return self._rrf_fuse(tfidf_ranked, embed_ranked, top_k)
+
+    async def search_async(
+        self, query: str, top_k: int = 5,
+    ) -> list[CodeChunk]:
+        """Async version of search — avoids run_until_complete."""
+        if not self._chunks:
+            return []
+
+        tfidf_ranked = self._search_tfidf(query, top_k=top_k * 2)
+
+        if not self._embeddings:
+            return tfidf_ranked[:top_k]
+
+        embed_ranked = await self._search_embedding(query, top_k=top_k * 2)
+
+        if not embed_ranked:
+            return tfidf_ranked[:top_k]
+
+        return self._rrf_fuse(tfidf_ranked, embed_ranked, top_k)
+
+    def _search_tfidf(
+        self, query: str, top_k: int = 10,
+    ) -> list[CodeChunk]:
+        """Pure TF-IDF ranked search."""
         if self._index_dirty:
             self._build_tfidf_index()
 
@@ -181,7 +227,6 @@ class ContextualIndex:
         if not query_tokens:
             return []
 
-        # Build query TF vector
         query_tf: dict[str, float] = defaultdict(float)
         for tok in query_tokens:
             query_tf[tok] += 1.0
@@ -191,7 +236,6 @@ class ContextualIndex:
             for tok, tf in query_tf.items()
         }
 
-        # Score each chunk
         scored: list[tuple[float, int]] = []
         for idx, doc_vec in enumerate(self._tf_vectors):
             score = sum(
@@ -203,6 +247,50 @@ class ContextualIndex:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [self._chunks[idx] for _, idx in scored[:top_k]]
+
+    async def _search_embedding(
+        self, query: str, top_k: int = 10,
+    ) -> list[CodeChunk]:
+        """Cosine-similarity search over pre-built embeddings."""
+        if not self._embeddings or not self._embedding_model:
+            return []
+
+        query_emb = await _get_embedding(query, self._embedding_model)
+        if not query_emb:
+            return []
+
+        scored: list[tuple[float, int]] = []
+        for idx, doc_emb in enumerate(self._embeddings):
+            sim = _cosine_similarity(query_emb, doc_emb)
+            if sim > 0:
+                scored.append((sim, idx))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [self._chunks[idx] for _, idx in scored[:top_k]]
+
+    @staticmethod
+    def _rrf_fuse(
+        list_a: list[CodeChunk],
+        list_b: list[CodeChunk],
+        top_k: int,
+        k: int = 60,
+    ) -> list[CodeChunk]:
+        """Reciprocal Rank Fusion of two ranked lists."""
+        scores: dict[int, float] = defaultdict(float)
+        chunk_map: dict[int, CodeChunk] = {}
+
+        for rank, chunk in enumerate(list_a):
+            cid = id(chunk)
+            scores[cid] += 1.0 / (k + rank + 1)
+            chunk_map[cid] = chunk
+
+        for rank, chunk in enumerate(list_b):
+            cid = id(chunk)
+            scores[cid] += 1.0 / (k + rank + 1)
+            chunk_map[cid] = chunk
+
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [chunk_map[cid] for cid, _ in ranked[:top_k]]
 
     def format_chunks_for_prompt(self, chunks: list[CodeChunk]) -> str:
         """Format retrieved chunks as a context block for LLM prompts."""
@@ -643,3 +731,83 @@ class ContextualIndex:
 
         self._index_dirty = False
         logger.debug("Built TF-IDF index over %d chunks", n_docs)
+
+    # -- Embedding-based retrieval -------------------------------------------
+
+    async def build_embeddings(
+        self,
+        model: str = "nomic-embed-text",
+        ollama_url: str = "http://localhost:11434",
+        batch_size: int = 32,
+    ) -> int:
+        """Generate embeddings for all chunks via Ollama.
+
+        Returns the number of chunks embedded.
+        """
+        if not self._chunks:
+            return 0
+
+        self._embedding_model = model
+        self._embeddings = []
+        total = len(self._chunks)
+
+        for start in range(0, total, batch_size):
+            batch = self._chunks[start : start + batch_size]
+            tasks = [
+                _get_embedding(
+                    c.content[:2048],
+                    model,
+                    ollama_url,
+                )
+                for c in batch
+            ]
+            results = await asyncio.gather(*tasks)
+            for emb in results:
+                self._embeddings.append(emb or [])
+
+        valid = sum(1 for e in self._embeddings if e)
+        logger.info(
+            "Built embeddings for %d/%d chunks (model=%s)",
+            valid, total, model,
+        )
+        return valid
+
+    @property
+    def has_embeddings(self) -> bool:
+        return bool(self._embeddings)
+
+
+# ---------------------------------------------------------------------------
+# Module-level embedding + similarity helpers
+# ---------------------------------------------------------------------------
+
+async def _get_embedding(
+    text: str,
+    model: str = "nomic-embed-text",
+    ollama_url: str = "http://localhost:11434",
+) -> list[float]:
+    """Get embedding vector from Ollama."""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{ollama_url}/api/embeddings",
+                json={"model": model, "prompt": text},
+            )
+            resp.raise_for_status()
+            return resp.json().get("embedding", [])
+    except Exception as exc:
+        logger.debug("Embedding request failed: %s", exc)
+        return []
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors."""
+    if len(a) != len(b) or not a:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
