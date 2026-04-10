@@ -18,6 +18,127 @@ from codator.infrastructure.tools.file_tool import GrepTool, GlobTool
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Robust JSON parsing for LLM output
+# ---------------------------------------------------------------------------
+
+def safe_parse_json(raw: str) -> Any:
+    """Parse JSON from LLM output, tolerating common generation errors.
+
+    Strategy (in order):
+    1. Standard json.loads
+    2. Fix invalid backslash escapes (\\n in code blocks, Windows paths, etc.)
+    3. dirtyjson (lenient parser that handles trailing commas, unquoted keys, etc.)
+    4. Extract first JSON object/array via regex, then retry steps 1-3
+    """
+    text = PlanActVerifyAgent._strip_json_fences(raw)
+
+    # 1. Standard parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Fix invalid backslash escapes — LLMs often produce \n, \t inside
+    #    code blocks that are NOT valid JSON escapes, or Windows-style paths
+    #    like C:\Users.  Replace unrecognised \X sequences with \\X.
+    import re
+    _VALID_JSON_ESCAPES = frozenset('"\\/bfnrtu')
+    def _fix_escapes(s: str) -> str:
+        result: list[str] = []
+        i = 0
+        while i < len(s):
+            if s[i] == '\\' and i + 1 < len(s):
+                next_ch = s[i + 1]
+                if next_ch in _VALID_JSON_ESCAPES:
+                    result.append(s[i:i+2])
+                    i += 2
+                else:
+                    # Invalid escape — double the backslash
+                    result.append('\\\\')
+                    i += 1
+            else:
+                result.append(s[i])
+                i += 1
+        return "".join(result)
+
+    fixed = _fix_escapes(text)
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. dirtyjson (lenient)
+    try:
+        import dirtyjson
+        return dirtyjson.loads(text)
+    except Exception:
+        pass
+
+    # 4. Extract first JSON object/array via regex
+    m = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', text)
+    if m:
+        extracted = m.group(1)
+        try:
+            return json.loads(extracted)
+        except json.JSONDecodeError:
+            pass
+        try:
+            return json.loads(_fix_escapes(extracted))
+        except json.JSONDecodeError:
+            pass
+        try:
+            import dirtyjson
+            return dirtyjson.loads(extracted)
+        except Exception:
+            pass
+
+    # All strategies failed — raise with the original error for diagnostics
+    return json.loads(text)  # will raise JSONDecodeError
+
+
+# ---------------------------------------------------------------------------
+# Environment error classification for smart verification
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate environment/infra problems, NOT code bugs
+_ENV_ERROR_PATTERNS = [
+    "PermissionError",
+    "Permission denied",
+    "Errno 13",
+    "collection error",
+    "CollectionError",
+    "import file mismatch",
+    "no module named",
+    "ModuleNotFoundError",
+    "FileNotFoundError: [Errno 2]",
+    "OSError: [Errno",
+    "socket.error",
+    "ConnectionRefusedError",
+    "TimeoutError",
+]
+
+
+def classify_verification_errors(
+    errors: list[str],
+) -> tuple[list[str], list[str]]:
+    """Split errors into (code_errors, env_errors).
+
+    Environment errors (permissions, missing modules, connection issues)
+    are separated from genuine code/syntax bugs.
+    """
+    code_errors: list[str] = []
+    env_errors: list[str] = []
+    for err in errors:
+        err_lower = err.lower()
+        if any(pat.lower() in err_lower for pat in _ENV_ERROR_PATTERNS):
+            env_errors.append(err)
+        else:
+            code_errors.append(err)
+    return code_errors, env_errors
+
+
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
@@ -310,7 +431,7 @@ class PlanActVerifyAgent:
     @staticmethod
     def _parse_plan(raw: str, task: str) -> AgentPlan:
         """Parse JSON response into an AgentPlan, validating actions."""
-        obj = json.loads(PlanActVerifyAgent._strip_json_fences(raw))
+        obj = safe_parse_json(raw)
         steps: list[AgentStep] = []
         for i, s in enumerate(obj.get("steps", [])):
             action = (
@@ -384,6 +505,36 @@ class PlanActVerifyAgent:
             output = await handler(step)
             step.status = "done"
             return ActionResult(step=step, success=True, output=output, error="")
+        except PermissionError as exc:
+            # Try to fix permissions automatically, then retry once
+            target_path = step.target
+            logger.warning(
+                "PermissionError on step %d (%s) — attempting chmod fix",
+                step.index, target_path,
+            )
+            try:
+                chmod_result = await self._terminal.run_command(
+                    f"chmod u+rw {target_path}", timeout=10,
+                )
+                if chmod_result.success:
+                    logger.info("chmod succeeded, retrying step %d", step.index)
+                    output = await handler(step)
+                    step.status = "done"
+                    return ActionResult(
+                        step=step, success=True,
+                        output=f"[auto-fixed permissions] {output}",
+                        error="",
+                    )
+            except Exception as chmod_exc:
+                logger.warning("chmod fix failed: %s", chmod_exc)
+            step.status = "failed"
+            return ActionResult(
+                step=step, success=False, output="",
+                error=(
+                    f"PermissionError: {exc}. "
+                    f"Try running: chmod u+rw {target_path}"
+                ),
+            )
         except Exception as exc:
             logger.error("Step %d failed: %s", step.index, exc)
             step.status = "failed"
@@ -400,10 +551,9 @@ class PlanActVerifyAgent:
         else:
             raw = step.description
             try:
-                edit_info = json.loads(self._strip_json_fences(raw))
-            except json.JSONDecodeError:
-                # LLMs often emit raw control chars in JSON strings;
-                # escape them and retry
+                edit_info = safe_parse_json(raw)
+            except (json.JSONDecodeError, ValueError):
+                # Last resort: strip control chars and retry
                 import re
                 sanitised = re.sub(
                     r'[\x00-\x1f]',
@@ -594,8 +744,13 @@ class PlanActVerifyAgent:
                     return lang
         return "python"  # default fallback
 
-    async def verify(self, language: str = "") -> VerifyResult:
-        """Run linting and tests to verify project health."""
+    async def verify(self, language: str = "", changed_files: list[str] | None = None) -> VerifyResult:
+        """Run linting and tests to verify project health.
+
+        Uses smart error classification: environment errors (PermissionError,
+        CollectionError, etc.) are reported as warnings, not hard failures,
+        unless the changed files have syntax errors.
+        """
         if not language:
             language = self._detect_language()
 
@@ -615,8 +770,24 @@ class PlanActVerifyAgent:
         else:
             logger.warning("No verification rules for language %r", language)
 
-        success = len(errors) == 0
-        return VerifyResult(success=success, errors=errors, warnings=warnings)
+        # Smart classification: separate env errors from code errors
+        code_errors, env_errors = classify_verification_errors(errors)
+
+        if env_errors:
+            logger.info(
+                "Environment errors detected (%d) — demoting to warnings",
+                len(env_errors),
+            )
+            for e in env_errors:
+                warnings.append(f"[ENV] {e}")
+
+        # If only env errors remain, check syntax of changed files as safety net
+        if env_errors and not code_errors and changed_files and language == "python":
+            syntax_errors = await self._check_python_syntax(changed_files)
+            code_errors.extend(syntax_errors)
+
+        success = len(code_errors) == 0
+        return VerifyResult(success=success, errors=code_errors, warnings=warnings)
 
     async def _verify_python(self) -> tuple[list[str], list[str]]:
         errors: list[str] = []
@@ -661,6 +832,23 @@ class PlanActVerifyAgent:
                         warnings.append(stripped)
 
         return errors, warnings
+
+    async def _check_python_syntax(self, files: list[str]) -> list[str]:
+        """Quick py_compile check on specific files — catches syntax errors fast."""
+        syntax_errors: list[str] = []
+        for rel_path in files:
+            if not rel_path.endswith(".py"):
+                continue
+            full = self._safe_path(rel_path)
+            if not full.exists():
+                continue
+            result = await self._run_quiet(
+                f"python -m py_compile {full}"
+            )
+            if result and ("SyntaxError" in result or "Error" in result):
+                syntax_errors.append(f"Syntax error in {rel_path}: {result.strip()}")
+                logger.warning("Syntax error detected in %s", rel_path)
+        return syntax_errors
 
     async def _verify_javascript(self) -> tuple[list[str], list[str]]:
         errors: list[str] = []
@@ -853,7 +1041,7 @@ class PlanActVerifyAgent:
 
         Tolerant of LLM field naming variations at every level.
         """
-        obj = json.loads(PlanActVerifyAgent._strip_json_fences(raw))
+        obj = safe_parse_json(raw)
         # Find the list of proposals — try multiple possible keys
         items: list[dict] = []
         for key in ("proposals", "highlights", "improvements", "suggestions",
@@ -968,15 +1156,18 @@ class PlanActVerifyAgent:
             heal_iterations = 0
 
             for iteration in range(1 + self._max_heal):
+                changed_files: list[str] = []
                 for step in current_plan.steps:
                     await _notify(step.description, "running")
                     result = await self.act(step)
                     all_actions.append(result)
                     status = "done" if result.success else "failed"
                     await _notify(step.description, status)
+                    if result.success and step.action in ("edit_file", "create_file"):
+                        changed_files.append(step.target)
 
                 await _notify("Verifying…", "running")
-                verification = await self.verify()
+                verification = await self.verify(changed_files=changed_files)
                 await _notify(
                     "Verification " + ("passed" if verification.success else "failed"),
                     "done" if verification.success else "failed",
@@ -1112,6 +1303,7 @@ class PlanActVerifyAgent:
 
         for iteration in range(1 + self._max_heal):
             # ---- Act -------------------------------------------------------
+            changed_files: list[str] = []
             for step in current_plan.steps:
                 await _notify(step.description, "running")
                 result = await self.act(step)
@@ -1122,6 +1314,9 @@ class PlanActVerifyAgent:
                     logger.warning(
                         "Step %d failed: %s", step.index, result.error
                     )
+                # Track files modified by mutating actions
+                if result.success and step.action in ("edit_file", "create_file"):
+                    changed_files.append(step.target)
 
             # ---- Verify (skip for read-only analysis) ----------------------
             if is_analysis_only:
@@ -1171,7 +1366,7 @@ class PlanActVerifyAgent:
                 )
 
             await _notify("Verifying…", "running")
-            verification = await self.verify()
+            verification = await self.verify(changed_files=changed_files)
             await _notify(
                 "Verification " + ("passed" if verification.success else "failed"),
                 "done" if verification.success else "failed",
