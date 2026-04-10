@@ -25,6 +25,7 @@
         input, select, button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.8rem; font-size: 0.9rem; }
         button { background: var(--accent); color: #fff; border: none; cursor: pointer; font-weight: 600; }
         button:hover { opacity: 0.9; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
         .input-group { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
         .input-group input { flex: 1; }
         .rec-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
@@ -94,6 +95,47 @@
                 <thead><tr><th>Model</th><th>Size</th><th>Modified</th><th></th></tr></thead>
                 <tbody id="ollama-body"><tr><td colspan="4" style="color:#8b949e">Loading...</td></tr></tbody>
             </table>
+        </div>
+
+        <div class="card">
+            <h2>🔥 GPU Live Monitor</h2>
+            <div class="grid">
+                <div>
+                    <div class="stat"><span class="stat-label">GPU Name</span><span class="stat-value" id="gpu-name">—</span></div>
+                    <div class="stat"><span class="stat-label">Temperature</span><span class="stat-value" id="gpu-temp2">—</span></div>
+                    <div class="stat"><span class="stat-label">Utilization</span><span class="stat-value" id="gpu-util">—</span></div>
+                </div>
+                <div>
+                    <div class="stat"><span class="stat-label">VRAM Used</span><span class="stat-value" id="gpu-vram-used">—</span></div>
+                    <div class="stat"><span class="stat-label">VRAM Free</span><span class="stat-value" id="gpu-vram-free">—</span></div>
+                    <div class="stat"><span class="stat-label">VRAM Total</span><span class="stat-value" id="gpu-vram-total">—</span></div>
+                </div>
+            </div>
+            <div class="bar-container"><div class="bar-fill" id="gpu-vram-bar">VRAM</div></div>
+            <h3 style="color:var(--accent);margin-top:1rem;font-size:1rem">Running Models</h3>
+            <table class="rec-table">
+                <thead><tr><th>Model</th><th>Size</th><th>Processor</th><th>Context</th></tr></thead>
+                <tbody id="running-models"><tr><td colspan="4" style="color:#8b949e">Loading...</td></tr></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>🧠 Contextual Index</h2>
+            <div class="stat"><span class="stat-label">Indexed Chunks</span><span class="stat-value" id="ci-chunks">—</span></div>
+            <div class="input-group" style="margin-top:0.8rem">
+                <input type="text" id="ci-query" placeholder="Search code... e.g. 'chat_stream async'">
+                <button onclick="searchIndex()">Search</button>
+            </div>
+            <div id="ci-results" style="margin-top:0.8rem"></div>
+        </div>
+
+        <div class="card">
+            <h2>🤖 Agent (Plan-Act-Verify)</h2>
+            <div class="input-group">
+                <input type="text" id="agent-task" placeholder="Describe a task... e.g. 'Add docstrings to config.py'" style="flex:2">
+                <button onclick="runAgent()" id="agent-btn">Run Agent</button>
+            </div>
+            <div id="agent-result" style="margin-top:0.8rem"></div>
         </div>
     </div>
 
@@ -189,6 +231,101 @@
             loadOllamaModels();
         }
         loadOllamaModels();
+
+        // GPU live monitor
+        async function refreshGPU() {
+            try {
+                const data = await fetch('/api/gpu/status').then(r => r.json());
+                const g = data.gpu || {};
+                document.getElementById('gpu-name').textContent = g.name || 'unknown';
+                document.getElementById('gpu-temp2').textContent = g.temperature_c ? g.temperature_c + '°C' : 'N/A';
+                document.getElementById('gpu-util').textContent = (g.utilization_pct || 0).toFixed(1) + '%';
+                document.getElementById('gpu-vram-used').textContent = (g.vram_used_mb || 0).toLocaleString() + ' MB';
+                document.getElementById('gpu-vram-free').textContent = (g.vram_free_mb || 0).toLocaleString() + ' MB';
+                document.getElementById('gpu-vram-total').textContent = (g.vram_total_mb || 0).toLocaleString() + ' MB';
+                const pct = g.vram_total_mb ? Math.round(g.vram_used_mb / g.vram_total_mb * 100) : 0;
+                const bar = document.getElementById('gpu-vram-bar');
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+                bar.className = 'bar-fill ' + (pct > 90 ? 'bar-red' : pct > 70 ? 'bar-yellow' : 'bar-green');
+                const rm = document.getElementById('running-models');
+                const models = (data.ollama || {}).running_models || [];
+                if (models.length === 0) {
+                    rm.innerHTML = '<tr><td colspan="4" style="color:#8b949e">No models loaded</td></tr>';
+                } else {
+                    rm.innerHTML = models.map(m =>
+                        `<tr><td>${m.name}</td><td>${(m.size_bytes/1073741824).toFixed(1)} GB</td><td>${m.processor}</td><td>${m.num_ctx}</td></tr>`
+                    ).join('');
+                }
+            } catch(e) { console.error('GPU refresh failed:', e); }
+        }
+        refreshGPU();
+        setInterval(refreshGPU, 3000);
+
+        async function refreshCI() {
+            try {
+                const data = await fetch('/api/context-index/stats').then(r => r.json());
+                document.getElementById('ci-chunks').textContent = data.available ? data.chunk_count : 'not available';
+            } catch(e) {}
+        }
+        refreshCI();
+
+        async function searchIndex() {
+            const query = document.getElementById('ci-query').value;
+            if (!query) return;
+            const div = document.getElementById('ci-results');
+            div.innerHTML = '<p style="color:#8b949e">Searching...</p>';
+            try {
+                const data = await fetch('/api/context-index/search', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({query, top_k: 5})
+                }).then(r => r.json());
+                if (!data.results || data.results.length === 0) {
+                    div.innerHTML = '<p style="color:#8b949e">No results found.</p>';
+                    return;
+                }
+                div.innerHTML = data.results.map(c =>
+                    `<div style="background:var(--bg);padding:0.6rem;margin-top:0.4rem;border-radius:6px;border:1px solid var(--border)">
+                        <div style="font-size:0.85rem;color:var(--accent)">${c.file_path}:${c.start_line}-${c.end_line}</div>
+                        <div style="font-size:0.8rem;color:#8b949e">${c.parent_context} (${c.chunk_type})</div>
+                        <pre style="font-size:0.8rem;margin-top:0.3rem;overflow-x:auto;white-space:pre-wrap;max-height:200px">${c.content.substring(0,500)}</pre>
+                    </div>`
+                ).join('');
+            } catch(e) { div.innerHTML = '<p style="color:var(--red)">Search failed.</p>'; }
+        }
+
+        async function runAgent() {
+            const task = document.getElementById('agent-task').value;
+            if (!task) return;
+            const btn = document.getElementById('agent-btn');
+            const div = document.getElementById('agent-result');
+            btn.disabled = true; btn.textContent = 'Running...';
+            div.innerHTML = '<p style="color:#8b949e">⏳ Agent is working...</p>';
+            try {
+                const data = await fetch('/api/agent/run', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({task})
+                }).then(r => r.json());
+                const statusColor = data.final_success ? 'var(--green)' : 'var(--red)';
+                const statusText = data.final_success ? '✅ SUCCESS' : '❌ FAILED';
+                let html = `<div style="color:${statusColor};font-weight:600;margin-bottom:0.5rem">${statusText}</div>`;
+                html += `<div style="color:#8b949e;font-size:0.85rem">Reasoning: ${data.reasoning || 'N/A'}</div>`;
+                html += `<div style="color:#8b949e;font-size:0.85rem">Heal iterations: ${data.heal_iterations}</div>`;
+                if (data.steps && data.steps.length > 0) {
+                    html += '<table class="rec-table" style="margin-top:0.5rem"><thead><tr><th>Action</th><th>Target</th><th>Status</th></tr></thead><tbody>';
+                    data.steps.forEach(s => {
+                        const icon = s.success ? '✅' : '❌';
+                        html += `<tr><td>${s.action}</td><td>${s.target}</td><td>${icon} ${s.error||''}</td></tr>`;
+                    });
+                    html += '</tbody></table>';
+                }
+                if (data.verification && data.verification.errors.length > 0) {
+                    html += `<div style="color:var(--red);margin-top:0.5rem;font-size:0.85rem">Errors: ${data.verification.errors.join(', ')}</div>`;
+                }
+                div.innerHTML = html;
+            } catch(e) { div.innerHTML = '<p style="color:var(--red)">Agent failed: ' + e.message + '</p>'; }
+            btn.disabled = false; btn.textContent = 'Run Agent';
+        }
     </script>
 </body>
 </html>

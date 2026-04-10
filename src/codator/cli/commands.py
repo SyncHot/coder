@@ -100,6 +100,12 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
         case "/gpu":
             await _handle_gpu(engine)
 
+        case "/memory":
+            await _handle_memory(engine)
+
+        case "/mcp":
+            await _handle_mcp(arg, engine)
+
         case _:
             print_error(f"Unknown command: {command}. Type /help for available commands.")
 
@@ -373,3 +379,95 @@ async def _handle_gpu(engine: ChatEngine) -> None:
         console.print(m_table)
     else:
         print_info("No models currently loaded in Ollama.")
+
+
+async def _handle_memory(engine: ChatEngine) -> None:
+    """Handle /memory — show contextual index stats."""
+    from rich.table import Table
+
+    ctx_idx = engine.contextual_index
+    table = Table(title="Contextual Index (Memory)", border_style="cyan")
+    table.add_column("Property", style="bold")
+    table.add_column("Value")
+
+    if ctx_idx is None:
+        table.add_row("Status", "[yellow]Not initialized[/yellow]")
+        table.add_row("Hint", "Run /index to build the index")
+    else:
+        chunks = ctx_idx._chunks
+        files = {c.file_path for c in chunks} if chunks else set()
+        table.add_row("Status", "[green]Active[/green]")
+        table.add_row("Indexed chunks", str(len(chunks)))
+        table.add_row("Indexed files", str(len(files)))
+        table.add_row("Vocabulary size", str(len(ctx_idx._vocabulary)))
+    console.print(table)
+
+    ms = engine.model_selector
+    if ms:
+        sel_table = Table(title="Model Selector", border_style="green")
+        sel_table.add_column("Property", style="bold")
+        sel_table.add_column("Value")
+        sel_table.add_row("Available models", str(len(ms._available_models)))
+        for name, vram in ms._available_models.items():
+            sel_table.add_row(f"  {name}", f"{vram:,} MB VRAM")
+        console.print(sel_table)
+
+
+async def _handle_mcp(arg: str, engine: ChatEngine) -> None:
+    """Handle /mcp connect <name> <command...> | list | disconnect <name>."""
+    parts = arg.strip().split(maxsplit=2)
+    action = parts[0] if parts else ""
+
+    if not action:
+        print_info(
+            "Usage: /mcp connect <name> <command...>\n"
+            "       /mcp list\n"
+            "       /mcp disconnect <name>"
+        )
+        return
+
+    from codator.infrastructure.mcp_client import MCPManager
+
+    if not hasattr(engine, "_mcp_manager"):
+        engine._mcp_manager = MCPManager()
+
+    mgr: MCPManager = engine._mcp_manager
+
+    match action:
+        case "connect":
+            if len(parts) < 3:
+                print_error("Usage: /mcp connect <name> <command...>")
+                return
+            name = parts[1]
+            cmd = parts[2].split()
+            print_info(f"Connecting to MCP server '{name}'...")
+            try:
+                count = await mgr.connect_server(name, cmd)
+                await mgr.register_all(engine._tools)
+                print_info(f"Connected! Registered {count} tools from '{name}'.")
+            except Exception as exc:
+                print_error(f"Failed to connect: {exc}")
+
+        case "list" | "ls":
+            servers = mgr.connected_servers
+            if not servers:
+                print_info("No MCP servers connected.")
+            else:
+                from rich.table import Table
+                table = Table(title="MCP Servers", border_style="cyan")
+                table.add_column("Name", style="bold")
+                table.add_column("Status")
+                for s in servers:
+                    table.add_row(s, "[green]connected[/green]")
+                console.print(table)
+
+        case "disconnect":
+            if len(parts) < 2:
+                print_error("Usage: /mcp disconnect <name>")
+                return
+            name = parts[1]
+            await mgr.disconnect_server(name)
+            print_info(f"Disconnected MCP server '{name}'.")
+
+        case _:
+            print_error(f"Unknown MCP action: {action}. Use connect/list/disconnect.")

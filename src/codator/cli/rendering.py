@@ -112,6 +112,8 @@ def print_help():
 | `/ollama [list\\|use <model>]` | List/switch Ollama models |
 | `/agent <task>` | Run Plan-Act-Verify agent cycle |
 | `/gpu` | Show GPU/VRAM & Ollama stats |
+| `/memory` | Show contextual index stats |
+| `/mcp <action>` | MCP server management (connect/list/disconnect) |
 """
     console.print(Markdown(help_text))
 

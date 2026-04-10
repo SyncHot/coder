@@ -54,6 +54,7 @@ tools = [
 
 [project.scripts]
 codator = "codator.cli.app:main"
+codator-mcp = "codator.infrastructure.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/codator"]
