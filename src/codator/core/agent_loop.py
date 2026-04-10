@@ -95,7 +95,10 @@ Rules:
   Never guess file paths — always refer to the actual files listed in the project context.
 - File paths must be relative to the project root.
 - For edit_file the description MUST be a JSON string:
-  {"file": "path", "old": "text to find", "new": "replacement text"}
+  {"file": "path", "old": "exact text to find", "new": "replacement text"}
+  IMPORTANT: The "old" field must be copied EXACTLY from the file you read —
+  including indentation, whitespace, and line endings. Do NOT paraphrase or
+  summarise the old text. Copy it character-for-character from the read_file output.
 - Keep plans minimal — only steps that are necessary.
 - Return ONLY valid JSON, no markdown fences.
 """
@@ -153,7 +156,11 @@ class PlanActVerifyAgent:
 
     async def _ollama_chat(self, system: str, user: str,
                           *, force_json: bool = True) -> str:
-        """Call Ollama POST /api/chat and return content."""
+        """Call Ollama POST /api/chat and return content.
+
+        Uses a long read timeout (10 min) to support large quantised models
+        (e.g. 32b-q3) that may generate slowly.
+        """
         payload = {
             "model": self._model,
             "messages": [
@@ -164,8 +171,10 @@ class PlanActVerifyAgent:
         }
         if force_json:
             payload["format"] = "json"
+        # connect fast, but allow up to 10 min for model generation
+        timeout = httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0)
         async with httpx.AsyncClient(
-            base_url=self._base_url, timeout=120.0
+            base_url=self._base_url, timeout=timeout
         ) as client:
             resp = await client.post("/api/chat", json=payload)
             resp.raise_for_status()
@@ -178,9 +187,10 @@ class PlanActVerifyAgent:
         obj = json.loads(raw)
         steps: list[AgentStep] = []
         for i, s in enumerate(obj.get("steps", [])):
-            action = s.get("action", "")
-            if action not in VALID_ACTIONS:
-                raise ValueError(f"Invalid action in step {i}: {action!r}")
+            action = s.get("action", "").strip()
+            if not action or action not in VALID_ACTIONS:
+                logger.warning("Skipping step %d with invalid action: %r", i, action)
+                continue
             steps.append(
                 AgentStep(
                     index=i,
@@ -261,13 +271,92 @@ class PlanActVerifyAgent:
         shutil.copy2(path, backup)
 
         content = path.read_text(encoding="utf-8")
-        if old_text not in content:
-            raise ValueError(
-                f"Text to replace not found in {file_rel}"
-            )
-        content = content.replace(old_text, new_text, 1)
-        path.write_text(content, encoding="utf-8")
-        return f"Edited {file_rel} (backup at {backup.name})"
+
+        # 1. Try exact match
+        if old_text in content:
+            content = content.replace(old_text, new_text, 1)
+            path.write_text(content, encoding="utf-8")
+            return f"Edited {file_rel} (exact match, backup at {backup.name})"
+
+        # 2. Try whitespace-normalised match
+        match_pos = self._fuzzy_find(content, old_text)
+        if match_pos is not None:
+            start, end = match_pos
+            # Preserve indentation of the first matched line
+            matched_block = content[start:end]
+            matched_lines = matched_block.splitlines(keepends=True)
+            new_lines = new_text.splitlines(keepends=True)
+            if matched_lines and new_lines:
+                import re
+                orig_indent = re.match(r"(\s*)", matched_lines[0]).group(1)
+                new_indent = re.match(r"(\s*)", new_lines[0]).group(1)
+                if orig_indent and not new_indent:
+                    # LLM omitted indentation — reindent new_text
+                    new_text = "".join(
+                        orig_indent + l if l.strip() else l
+                        for l in new_lines
+                    )
+            content = content[:start] + new_text + content[end:]
+            path.write_text(content, encoding="utf-8")
+            return f"Edited {file_rel} (fuzzy match, backup at {backup.name})"
+
+        raise ValueError(
+            f"Text to replace not found in {file_rel} (neither exact nor fuzzy)"
+        )
+
+    @staticmethod
+    def _fuzzy_find(content: str, needle: str) -> tuple[int, int] | None:
+        """Find the best approximate match of *needle* inside *content*.
+
+        Returns (start, end) character indices in *content* or None.
+        Uses character-level similarity on sliding windows of lines.
+        """
+        import difflib
+
+        needle_lines = needle.strip().splitlines()
+        if not needle_lines:
+            return None
+
+        content_lines = content.splitlines(keepends=True)
+        if not content_lines:
+            return None
+
+        # Normalised needle text for comparison (stripped lines joined)
+        needle_norm = "\n".join(l.strip() for l in needle_lines)
+        n = len(needle_lines)
+
+        best_ratio = 0.0
+        best_span: tuple[int, int] | None = None
+
+        # Try windows of n-2 .. n+2 lines to handle off-by-a-few
+        for delta in range(-2, 3):
+            m = n + delta
+            if m < 1 or m > len(content_lines):
+                continue
+            for i in range(len(content_lines) - m + 1):
+                window_norm = "\n".join(
+                    l.strip() for l in content_lines[i:i + m]
+                )
+                sm = difflib.SequenceMatcher(
+                    None, needle_norm, window_norm, autojunk=False
+                )
+                ratio = sm.ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_span = (i, i + m)
+
+        # Require at least 55% character-level similarity
+        if best_ratio < 0.55 or best_span is None:
+            return None
+
+        start_line, end_line = best_span
+        start_pos = sum(len(l) for l in content_lines[:start_line])
+        end_pos = sum(len(l) for l in content_lines[:end_line])
+        logger.info(
+            "Fuzzy match: ratio=%.2f, lines %d-%d in file",
+            best_ratio, start_line, end_line,
+        )
+        return start_pos, end_pos
 
     async def _act_create_file(self, step: AgentStep) -> str:
         path = self._safe_path(step.target)
@@ -538,12 +627,19 @@ class PlanActVerifyAgent:
                 await _notify(
                     f"Self-healing (attempt {heal_iterations})…", "running"
                 )
-                current_plan = await self.self_heal(
-                    verification.errors, task, project_context
-                )
-                await _notify(
-                    f"Heal plan ready — {len(current_plan.steps)} steps", "done"
-                )
+                try:
+                    current_plan = await self.self_heal(
+                        verification.errors, task, project_context
+                    )
+                    await _notify(
+                        f"Heal plan ready — {len(current_plan.steps)} steps", "done"
+                    )
+                except (json.JSONDecodeError, ValueError, KeyError) as exc:
+                    logger.warning("Heal plan parsing failed: %s", exc)
+                    await _notify(
+                        f"Self-healing failed (bad response): {exc}", "failed"
+                    )
+                    break  # stop heal loop — no valid plan to retry
 
         # exhausted heal budget
         return AgentResult(
