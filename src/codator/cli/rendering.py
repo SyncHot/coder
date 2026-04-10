@@ -228,6 +228,7 @@ def print_help():
 |---------|-------------|
 | `/help` | Show this help |
 | `/quit` or `/exit` | Exit codator |
+| `/model` | Pick from available Ollama models (interactive) |
 | `/model <path>` | Load a local GGUF model |
 | `/api <claude\\|openai\\|ollama>` | Switch to cloud/local API |
 | `/context` | Show context usage |
@@ -242,6 +243,8 @@ def print_help():
 | `/terminal <cmd>` | Run a local shell command (sandboxed) |
 | `/ollama [list\\|use <model>]` | List/switch Ollama models |
 | `/agent <task>` | Run Plan-Act-Verify agent cycle |
+| `/agent` | Switch to persistent agent mode |
+| `/chat` | Switch back to chat mode |
 | `/gpu` | Show GPU/VRAM & Ollama stats |
 | `/memory` | Show contextual index stats |
 | `/mcp <action>` | MCP server management (connect/list/disconnect) |

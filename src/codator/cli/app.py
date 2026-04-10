@@ -32,7 +32,7 @@ COMMANDS = [
     "/help", "/quit", "/exit", "/model", "/api", "/context",
     "/clear", "/hardware", "/index", "/git", "/web", "/restart",
     "/ssh", "/browser", "/terminal", "/ollama",
-    "/agent", "/gpu", "/memory", "/mcp",
+    "/agent", "/chat", "/gpu", "/memory", "/mcp",
     "/save", "/load", "/history", "/undo",
     "/fetch", "/search",
 ]
@@ -115,9 +115,10 @@ async def async_main():
     # Dynamic bottom toolbar callable
     def _toolbar():
         ctx = engine.context_status
+        mode_label = "🤖 AGENT" if engine.mode == "agent" else "💬 CHAT"
         if not ctx:
             return HTML(
-                f'<b>{engine.active_model or "no model"}</b>'
+                f'<b>{mode_label}</b> │ <b>{engine.active_model or "no model"}</b>'
             )
 
         total = ctx.get("total_tokens", 0)
@@ -139,6 +140,7 @@ async def async_main():
         bar = "█" * filled + "░" * (10 - filled)
 
         parts = [
+            f'<b>{mode_label}</b>',
             f'<b>{engine.active_model or "no model"}</b>',
             f'<{color}>[{bar}] {pct:.0f}%</{color}>',
             f'{total:,}/{window:,} tokens',
@@ -159,10 +161,11 @@ async def async_main():
     try:
         while True:
             try:
+                prompt_prefix = "agent> " if engine.mode == "agent" else "you> "
                 # prompt_toolkit is sync; run in executor
                 user_input = await asyncio.get_running_loop().run_in_executor(
                     None,
-                    lambda: session.prompt("you> "),
+                    lambda: session.prompt(prompt_prefix),
                 )
             except (EOFError, KeyboardInterrupt):
                 print_info("\nGoodbye! 👋")
@@ -177,6 +180,12 @@ async def async_main():
                 should_exit = await handle_command(user_input, engine)
                 if should_exit:
                     break
+                continue
+
+            # Agent mode — run through Plan-Act-Verify
+            if engine.mode == "agent":
+                from codator.cli.commands import run_agent_task
+                await run_agent_task(user_input, engine)
                 continue
 
             # Chat with streaming

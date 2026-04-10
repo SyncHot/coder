@@ -35,7 +35,7 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
 
         case "/model":
             if not arg:
-                print_error("Usage: /model <path-to-gguf-file>")
+                await _handle_model_picker(engine)
             else:
                 print_info(f"Loading model: {arg}...")
                 result = await engine.switch_model(arg)
@@ -91,7 +91,15 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
             await _handle_ollama(arg, engine)
 
         case "/agent":
-            await _handle_agent(arg, engine)
+            if not arg.strip():
+                engine.set_mode("agent")
+                print_info("🤖 Switched to **agent mode**. All messages will run Plan-Act-Verify.\n   Type /chat to switch back to chat mode.")
+            else:
+                await _handle_agent(arg, engine)
+
+        case "/chat":
+            engine.set_mode("chat")
+            print_info("💬 Switched to **chat mode**.")
 
         case "/gpu":
             await _handle_gpu(engine)
@@ -124,6 +132,71 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
             print_error(f"Unknown command: {command}. Type /help for available commands.")
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Model picker
+# ---------------------------------------------------------------------------
+
+
+async def _handle_model_picker(engine: ChatEngine) -> None:
+    """Interactive model picker — lists available Ollama models, user picks by number."""
+    from codator.infrastructure.ollama_backend import OllamaBackend
+    from rich.table import Table
+
+    print_info("Fetching available models from Ollama...")
+    backend = OllamaBackend(engine._settings)
+    models = await backend.list_models()
+    await backend.close()
+
+    if not models:
+        print_error("No models found. Is Ollama running?")
+        return
+
+    # Sort by name, show table with numbers
+    models.sort(key=lambda m: m.get("name", ""))
+    table = Table(title="Available Models", border_style="cyan")
+    table.add_column("#", style="bold yellow", justify="right")
+    table.add_column("Name", style="bold")
+    table.add_column("Size")
+
+    for i, m in enumerate(models, 1):
+        name = m.get("name", "?")
+        size_bytes = m.get("size", 0)
+        size_gb = f"{size_bytes / 1_073_741_824:.1f} GB"
+        active = " ← active" if name == engine.active_model else ""
+        table.add_row(str(i), f"{name}{active}", size_gb)
+
+    console.print(table)
+    console.print("[dim]Enter number to switch, or press Enter to cancel:[/dim]")
+
+    import asyncio
+    try:
+        choice = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input("model #> ").strip(),
+        )
+    except (EOFError, KeyboardInterrupt):
+        print_info("Cancelled.")
+        return
+
+    if not choice:
+        print_info("Cancelled.")
+        return
+
+    try:
+        idx = int(choice) - 1
+        if idx < 0 or idx >= len(models):
+            print_error(f"Invalid choice. Pick 1-{len(models)}.")
+            return
+    except ValueError:
+        # Treat as direct model name
+        result = await engine.switch_ollama_model(choice)
+        print_info(result)
+        return
+
+    selected = models[idx]["name"]
+    result = await engine.switch_ollama_model(selected)
+    print_info(result)
 
 
 # ---------------------------------------------------------------------------
@@ -300,16 +373,8 @@ async def _handle_ollama(arg: str, engine: ChatEngine) -> None:
             print_info(result)
 
 
-async def _handle_agent(arg: str, engine: ChatEngine) -> None:
-    """Handle /agent <task description> — run Plan-Act-Verify cycle."""
-    if not arg.strip():
-        print_info(
-            "Usage: /agent <task description>\n"
-            "  Runs a Plan-Act-Verify cycle to accomplish the task.\n"
-            "  Example: /agent Add docstrings to all functions in config.py"
-        )
-        return
-
+async def run_agent_task(task: str, engine: ChatEngine) -> None:
+    """Run the Plan-Act-Verify agent cycle for a task. Shared by /agent and agent mode."""
     from rich.table import Table
 
     from codator.core.agent_loop import PlanActVerifyAgent
@@ -328,12 +393,10 @@ async def _handle_agent(arg: str, engine: ChatEngine) -> None:
             status, "•"
         )
         step_log.append((icon, description))
-        # Print inline
         console.print(f"  {icon} {description}")
 
-    print_info(f"🤖 Agent starting: {arg}")
+    print_info(f"🤖 Agent starting: {task}")
     try:
-        # Build project context with file tree so the agent knows where files are
         project_context = ""
         try:
             from pathlib import Path
@@ -343,7 +406,6 @@ async def _handle_agent(arg: str, engine: ChatEngine) -> None:
             for f in sorted(root.rglob("*")):
                 if f.is_file() and f.suffix in code_exts:
                     rel = f.relative_to(root)
-                    # Skip hidden dirs, __pycache__, node_modules, .venv
                     parts = rel.parts
                     if any(p.startswith(".") or p in (
                         "__pycache__", "node_modules", ".venv", "venv",
@@ -357,9 +419,8 @@ async def _handle_agent(arg: str, engine: ChatEngine) -> None:
         except Exception:
             pass
 
-        result = await agent.run(arg, project_context=project_context, on_step=on_step)
+        result = await agent.run(task, project_context=project_context, on_step=on_step)
 
-        # Summary
         table = Table(title="Agent Result", border_style="cyan")
         table.add_column("Metric", style="bold")
         table.add_column("Value")
@@ -376,7 +437,6 @@ async def _handle_agent(arg: str, engine: ChatEngine) -> None:
             table.add_row("Warnings", "\n".join(result.verification.warnings[:5]))
         console.print(table)
 
-        # Show analysis summary if present
         for action in result.actions:
             if (
                 action.success
@@ -389,6 +449,19 @@ async def _handle_agent(arg: str, engine: ChatEngine) -> None:
                 console.print(Markdown(action.output))
     except Exception as exc:
         print_error(f"Agent failed: {exc}")
+
+
+async def _handle_agent(arg: str, engine: ChatEngine) -> None:
+    """Handle /agent <task description> — run Plan-Act-Verify cycle."""
+    if not arg.strip():
+        print_info(
+            "Usage: /agent <task description>\n"
+            "  Runs a Plan-Act-Verify cycle to accomplish the task.\n"
+            "  Example: /agent Add docstrings to all functions in config.py\n"
+            "  Or type /agent (no args) to enter persistent agent mode."
+        )
+        return
+    await run_agent_task(arg, engine)
 
 
 async def _handle_gpu(engine: ChatEngine) -> None:

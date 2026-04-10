@@ -127,6 +127,7 @@ class ChatEngine:
         self._manual_model_override: bool = False
         self._web_server: Any | None = None
         self._web_task: Any | None = None
+        self._mode: str = "chat"  # "chat" or "agent"
 
     # ----- Lifecycle -----
 
@@ -627,6 +628,15 @@ class ChatEngine:
     @property
     def contextual_index(self) -> ContextualIndex | None:
         return self._contextual_index
+
+    @property
+    def mode(self) -> str:
+        """Current interaction mode: 'chat' or 'agent'."""
+        return self._mode
+
+    def set_mode(self, mode: str) -> None:
+        """Switch interaction mode between 'chat' and 'agent'."""
+        self._mode = mode
 
     async def start_web(self) -> str:
         """Start the web dashboard in the background. Returns status message."""
