@@ -922,6 +922,24 @@ class ChatEngine:
                 msg.content = new_prompt
                 break
 
+    def get_recent_context_summary(self, max_messages: int = 10) -> str:
+        """Return a brief summary of recent chat for passing to agent mode."""
+        if not self._context:
+            return ""
+        messages = self._context.get_messages()
+        conv = [m for m in messages if m.role not in (Role.SYSTEM, Role.SUMMARY)]
+        recent = conv[-max_messages:]
+        if not recent:
+            return ""
+        parts = []
+        for m in recent:
+            label = m.role.value.upper()
+            content = m.content
+            if len(content) > 500:
+                content = content[:500] + "... [truncated]"
+            parts.append(f"[{label}]: {content}")
+        return "=== Recent Chat Context ===\n" + "\n\n".join(parts) + "\n=== End Chat Context ==="
+
     # ----- Tool execution -----
 
     @property

@@ -161,7 +161,7 @@ async def async_main():
             f'{msgs} msgs',
         ]
         if compactions > 0:
-            parts.append(f'⚡{compactions}')
+            parts.append(f'<ansiyellow>⚡{compactions} compacted</ansiyellow>')
 
         return HTML(" │ ".join(parts))
 

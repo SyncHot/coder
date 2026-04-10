@@ -386,12 +386,24 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
 
     from codator.core.agent_loop import PlanActVerifyAgent, Proposal
 
+    async def _confirm_command(command: str, reason: str) -> bool:
+        """Interactive confirmation for dangerous agent commands."""
+        from rich import print as rprint
+
+        rprint(f"[bold yellow]⚠️  Agent wants to run:[/bold yellow] {command}")
+        rprint(f"[dim]Reason: {reason}[/dim]")
+        answer = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input("Allow? (y/N): ").strip().lower()
+        )
+        return answer in ("y", "yes")
+
     ollama_cfg = engine._settings.ollama
     agent = PlanActVerifyAgent(
         ollama_base_url=ollama_cfg.base_url,
         model=engine.active_model or ollama_cfg.model,
         project_root=engine._project_root,
         num_ctx=engine._settings.inference.context_size,
+        confirm_callback=_confirm_command,
     )
 
     # --- Helpers ---
@@ -425,7 +437,10 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
 
     # --- Build project context ---
 
+    chat_context = engine.get_recent_context_summary()
     project_context = _build_project_context(engine)
+    if chat_context:
+        project_context = chat_context + "\n\n" + project_context
 
     print_info(f"🤖 Agent starting: {task}")
 

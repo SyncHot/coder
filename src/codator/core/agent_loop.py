@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 
 from codator.infrastructure.tools.terminal_tool import TerminalTool
+from codator.infrastructure.tools.file_tool import GrepTool, GlobTool
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 VALID_ACTIONS = frozenset(
     {"read_file", "edit_file", "create_file", "run_command", "delete_file",
-     "analyze"}
+     "analyze", "grep", "glob"}
 )
 
 
@@ -88,20 +89,28 @@ Given a task and optional project context, return a JSON object with:
   "task": "<restate the task concisely>",
   "reasoning": "<brief explanation of your approach>",
   "steps": [
-    {"action": "<read_file|edit_file|create_file|run_command|delete_file|analyze>",
-     "target": "<file path or shell command>",
+    {"action": "<read_file|edit_file|create_file|run_command|delete_file|analyze|grep|glob>",
+     "target": "<file path, shell command, regex pattern, or glob pattern>",
      "description": "<what this step does>"}
   ]
 }
 
 Rules:
-- Only use the six allowed actions.
+- Only use the eight allowed actions.
 - **ALWAYS start by reading the relevant files first** before editing or running commands.
 - If the task is a question, review, or analysis (e.g. "what can be improved",
-  "check this file", "review the code"), use only read_file and analyze actions.
+  "check this file", "review the code"), use only read_file, analyze, grep, and glob actions.
   Do NOT edit or run commands for analytical tasks.
 - The "analyze" action takes a file path as target and a description of what to
   look for. It is read-only and produces observations — no changes.
+- The "grep" action searches for a regex pattern in the codebase. Target is the
+  regex pattern. Description can be a JSON string with optional "path" (directory
+  to search in) and "glob" (file filter, e.g. "*.py") keys.
+- The "glob" action finds files matching a name pattern. Target is the glob
+  pattern (e.g. "**/*.py", "src/**/*.ts"). Description can be a JSON string with
+  an optional "path" (directory to search in) key.
+- Use grep to search for code patterns, function definitions, or imports.
+  Use glob to find files by name.
 - **Use the project file tree provided in context to find correct file paths.**
   Never guess file paths — always refer to the actual files listed in the project context.
 - File paths must be relative to the project root.
@@ -158,11 +167,16 @@ You are a coding assistant that implements specific changes.
 You are given one or more proposals to implement. For each proposal, produce
 the necessary plan steps (read_file first, then edit_file).
 
+You also have read-only grep and glob actions to find code before editing:
+- "grep": target is a regex pattern; description can be JSON with "path" and "glob" keys.
+- "glob": target is a glob pattern (e.g. "**/*.py"); description can be JSON with a "path" key.
+
 Return JSON with the same schema as a planning response:
 {
   "task": "<implementation summary>",
   "reasoning": "<approach>",
   "steps": [
+    {"action": "grep", "target": "def my_function", "description": "Find function definition"},
     {"action": "read_file", "target": "path", "description": "Read file before editing"},
     {"action": "edit_file", "target": "path", "description": "{\"file\":\"path\",\"old\":\"exact old text\",\"new\":\"new text\"}"}
   ]
@@ -170,6 +184,7 @@ Return JSON with the same schema as a planning response:
 
 Rules:
 - ALWAYS read_file first before editing.
+- Use grep/glob to locate code when you are unsure of exact file paths or positions.
 - For edit_file the description MUST be a JSON string:
   {"file": "path", "old": "exact text to find", "new": "replacement text"}
   IMPORTANT: The "old" field must be copied EXACTLY from the file you read —
@@ -194,6 +209,7 @@ class PlanActVerifyAgent:
         project_root: str = ".",
         max_heal_iterations: int = 3,
         num_ctx: int = 32768,
+        confirm_callback: Callable[[str, str], Any] | None = None,
     ) -> None:
         self._base_url = ollama_base_url.rstrip("/")
         self._model = model
@@ -204,7 +220,10 @@ class PlanActVerifyAgent:
             working_dir=str(self._project_root),
             timeout=60,
             require_confirm=True,
+            confirm_callback=confirm_callback,
         )
+        self._grep = GrepTool(project_root=str(self._project_root))
+        self._glob = GlobTool(project_root=str(self._project_root))
 
     # -- helpers -------------------------------------------------------------
 
@@ -357,6 +376,8 @@ class PlanActVerifyAgent:
                 "run_command": self._act_run_command,
                 "delete_file": self._act_delete_file,
                 "analyze": self._act_analyze,
+                "grep": self._act_grep,
+                "glob": self._act_glob,
             }.get(step.action)
             if handler is None:
                 raise ValueError(f"Unknown action: {step.action!r}")
@@ -526,6 +547,36 @@ class PlanActVerifyAgent:
         if len(content) > 15000:
             content = content[:15000] + f"\n... [truncated, total {len(content)} chars]"
         return f"=== {step.target} ===\n{content}"
+
+    async def _act_grep(self, step: AgentStep) -> str:
+        """Search for a pattern in the codebase."""
+        kwargs: dict[str, Any] = {"pattern": step.target}
+        if step.description:
+            try:
+                extra = json.loads(self._strip_json_fences(step.description))
+                if isinstance(extra, dict):
+                    kwargs.update(extra)
+            except (json.JSONDecodeError, ValueError):
+                pass  # description is just human-readable text, not JSON
+        result = await self._grep.execute(**kwargs)
+        if not result.success:
+            raise RuntimeError(result.error or "Grep failed")
+        return result.output or "No matches found."
+
+    async def _act_glob(self, step: AgentStep) -> str:
+        """Find files matching a glob pattern."""
+        kwargs: dict[str, Any] = {"pattern": step.target}
+        if step.description:
+            try:
+                extra = json.loads(self._strip_json_fences(step.description))
+                if isinstance(extra, dict):
+                    kwargs.update(extra)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        result = await self._glob.execute(**kwargs)
+        if not result.success:
+            raise RuntimeError(result.error or "Glob failed")
+        return result.output or "No files matched."
 
     # -- verify --------------------------------------------------------------
 

@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Number of recent TOOL messages to preserve across compaction
+KEEP_TOOL_MESSAGES = 4
+
 # Template for the summary generation prompt
 SUMMARY_PROMPT = """\
 You are a technical context summarizer. Summarize the following conversation \
@@ -194,6 +197,12 @@ class AdaptiveContextManager(ContextManager):
         # Keep last N messages (pairs ideally, but at minimum the raw count)
         kept_messages = conv_msgs[-keep_n:] if keep_n > 0 else []
 
+        # Also keep recent tool results that aren't already in kept_messages
+        kept_ids = set(id(m) for m in kept_messages)
+        recent_tool_msgs = [
+            m for m in conv_msgs if m.role == Role.TOOL and id(m) not in kept_ids
+        ][-KEEP_TOOL_MESSAGES:]
+
         # Build summary message
         summary_msg = Message(
             role=Role.SUMMARY,
@@ -205,12 +214,13 @@ class AdaptiveContextManager(ContextManager):
             token_count=self._count(snapshot.summary_text) + 20,  # overhead
         )
 
-        # Reassemble
-        self._messages = system_msgs + [summary_msg] + kept_messages
+        # Reassemble: system + summary + recent_tools + kept_messages
+        self._messages = system_msgs + [summary_msg] + recent_tool_msgs + kept_messages
 
         logger.info(
-            "Compaction complete: %d → %d tokens, kept %d messages + snapshot",
-            snapshot.original_token_count, self.total_tokens(), len(kept_messages),
+            "Compaction complete: %d → %d tokens, kept %d messages + %d tool msgs + snapshot",
+            snapshot.original_token_count, self.total_tokens(),
+            len(kept_messages), len(recent_tool_msgs),
         )
         return (
             f"⚠️ Context compacted: {snapshot.original_token_count:,} → "
