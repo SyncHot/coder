@@ -29,10 +29,8 @@ from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
 from codator.infrastructure.ollama_backend import OllamaBackend
 from codator.infrastructure.tools.browser_tool import BrowserTool
 from codator.infrastructure.tools.file_tool import (
-    EditFileTool,
     ListDirectoryTool,
     ReadFileTool,
-    WriteFileTool,
 )
 from codator.infrastructure.tools.ssh_tool import SSHTool
 from codator.infrastructure.tools.terminal_tool import TerminalTool
@@ -159,11 +157,9 @@ class ChatEngine:
         """Register all tools including file access."""
         cfg = self._settings
 
-        # File tools (always available)
+        # File tools — read-only always available; write tools only via /agent
         self._tools.register(ReadFileTool(project_root=self._project_root))
         self._tools.register(ListDirectoryTool(project_root=self._project_root))
-        self._tools.register(WriteFileTool(project_root=self._project_root))
-        self._tools.register(EditFileTool(project_root=self._project_root))
 
         # Terminal tool
         terminal = TerminalTool(
