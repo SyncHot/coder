@@ -78,7 +78,10 @@ class TreeSitterProjectIndexer(ProjectIndexer):
 
     def _init_tree_sitter(self):
         try:
-            import tree_sitter_languages  # noqa: F401
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=FutureWarning, module="tree_sitter")
+                import tree_sitter_languages  # noqa: F401
             self._ts_available = True
         except ImportError:
             logger.warning(
@@ -90,8 +93,11 @@ class TreeSitterProjectIndexer(ProjectIndexer):
             return None
         if language not in self._parsers:
             try:
-                import tree_sitter_languages
-                self._parsers[language] = tree_sitter_languages.get_parser(language)
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=FutureWarning, module="tree_sitter")
+                    import tree_sitter_languages
+                    self._parsers[language] = tree_sitter_languages.get_parser(language)
             except Exception:
                 self._parsers[language] = None
         return self._parsers[language]
