@@ -50,7 +50,7 @@
                     <button onclick="switchModel()">Load</button>
                 </div>
                 <div class="input-group" style="margin-top:0.5rem">
-                    <select id="api-provider"><option value="claude">Claude</option><option value="openai">OpenAI</option></select>
+                    <select id="api-provider"><option value="ollama">Ollama</option><option value="claude">Claude</option><option value="openai">OpenAI</option></select>
                     <button onclick="switchAPI()">Switch API</button>
                 </div>
             </div>
@@ -85,6 +85,14 @@
             <table class="rec-table">
                 <thead><tr><th>Model</th><th>Params</th><th>Quant</th><th>Mode</th><th>Est. VRAM</th></tr></thead>
                 <tbody id="rec-body"></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>🦙 Ollama Models</h2>
+            <table class="rec-table">
+                <thead><tr><th>Model</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+                <tbody id="ollama-body"><tr><td colspan="4" style="color:#8b949e">Loading...</td></tr></tbody>
             </table>
         </div>
     </div>
@@ -149,6 +157,38 @@
         }
         refresh();
         setInterval(refresh, 5000);
+
+        async function loadOllamaModels() {
+            try {
+                const res = await fetch('/api/ollama/models');
+                const data = await res.json();
+                const tbody = document.getElementById('ollama-body');
+                const status = await fetch('/api/status').then(r => r.json());
+                const active = status.model || '';
+                tbody.innerHTML = '';
+                if (!data.models || data.models.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="color:#8b949e">No models found. Is Ollama running?</td></tr>';
+                    return;
+                }
+                data.models.forEach(m => {
+                    const sizeGB = (m.size / 1073741824).toFixed(1);
+                    const modified = (m.modified_at || '').slice(0, 10);
+                    const isActive = m.name === active;
+                    const btn = isActive
+                        ? '<span class="badge badge-gpu">active</span>'
+                        : `<button onclick="useOllama('${m.name}')" style="padding:0.2rem 0.6rem;font-size:0.8rem">Use</button>`;
+                    tbody.innerHTML += `<tr><td>${m.name}</td><td>${sizeGB} GB</td><td>${modified}</td><td>${btn}</td></tr>`;
+                });
+            } catch(e) { console.error('Ollama load failed:', e); }
+        }
+        async function useOllama(model) {
+            const res = await fetch('/api/ollama/switch', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model}) });
+            const data = await res.json();
+            alert(data.status || data.error);
+            refresh();
+            loadOllamaModels();
+        }
+        loadOllamaModels();
     </script>
 </body>
 </html>

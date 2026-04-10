@@ -112,3 +112,22 @@ def _register_routes(app: FastAPI):
         except Exception:
             pass
         return {"temperature": "unavailable"}
+
+    @app.get("/api/ollama/models")
+    async def ollama_models():
+        """List available Ollama models."""
+        from codator.infrastructure.ollama_backend import OllamaBackend
+        backend = OllamaBackend(_engine._settings)
+        models = await backend.list_models()
+        await backend.close()
+        return {"models": models}
+
+    @app.post("/api/ollama/switch")
+    async def ollama_switch(request: Request):
+        """Switch to a specific Ollama model."""
+        data = await request.json()
+        model = data.get("model", "")
+        if not model:
+            return JSONResponse({"error": "model required"}, status_code=400)
+        result = await _engine.switch_ollama_model(model)
+        return {"status": result, "model": _engine.active_model}
