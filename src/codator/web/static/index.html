@@ -34,6 +34,28 @@
         .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
         .badge-gpu { background: var(--green); color: #000; }
         .badge-hybrid { background: var(--yellow); color: #000; }
+        .badge-cpu { background: #8b5cf6; color: #fff; }
+        .badge-tight { background: var(--red); color: #fff; }
+        .badge-tag { background: var(--border); color: var(--text); font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 8px; margin-right: 0.3rem; }
+        .store-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 0.8rem; transition: border-color 0.2s; }
+        .store-card:hover { border-color: var(--accent); }
+        .store-card.installed { border-left: 3px solid var(--green); }
+        .store-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+        .store-name { font-weight: 700; font-size: 1rem; color: var(--text); }
+        .store-meta { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 0.3rem; }
+        .store-desc { color: #8b949e; font-size: 0.85rem; margin-top: 0.4rem; }
+        .store-notes { color: var(--yellow); font-size: 0.8rem; margin-top: 0.3rem; }
+        .store-scores { display: flex; gap: 1rem; margin-top: 0.5rem; }
+        .store-score { font-size: 0.8rem; color: #8b949e; }
+        .store-score span { color: var(--accent); font-weight: 600; }
+        .stars { color: var(--yellow); letter-spacing: 1px; }
+        .store-filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+        .store-filters select, .store-filters input { font-size: 0.85rem; padding: 0.35rem 0.6rem; }
+        .store-filters button { font-size: 0.85rem; padding: 0.35rem 0.8rem; }
+        .tab-bar { display: flex; gap: 0; margin-bottom: 1rem; border-bottom: 2px solid var(--border); }
+        .tab-btn { padding: 0.5rem 1.2rem; background: none; border: none; color: #8b949e; cursor: pointer; font-size: 0.9rem; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+        .tab-btn:hover { color: var(--text); }
         #refresh-btn { position: fixed; top: 1rem; right: 1rem; }
     </style>
 </head>
@@ -94,6 +116,38 @@
                 <thead><tr><th>Model</th><th>Params</th><th>Quant</th><th>Mode</th><th>Est. VRAM</th><th></th></tr></thead>
                 <tbody id="rec-body"></tbody>
             </table>
+        </div>
+
+        <div class="card" id="model-store-section">
+            <h2>🏪 Model Store</h2>
+            <p style="color:#8b949e;font-size:0.85rem;margin-bottom:1rem">Curated models for coding, agent, and analysis tasks. Matched to your hardware (16 GB VRAM, 31 GB RAM).</p>
+
+            <div class="tab-bar">
+                <button class="tab-btn active" onclick="switchStoreTab('recommended')">⭐ Recommended</button>
+                <button class="tab-btn" onclick="switchStoreTab('all')">📦 All Models</button>
+                <button class="tab-btn" onclick="switchStoreTab('gpu')">🎮 GPU</button>
+                <button class="tab-btn" onclick="switchStoreTab('hybrid')">⚡ Hybrid</button>
+                <button class="tab-btn" onclick="switchStoreTab('cpu')">💻 CPU (72B)</button>
+            </div>
+
+            <div class="store-filters">
+                <input type="text" id="store-search" placeholder="Search models..." oninput="filterStore()" style="flex:1;min-width:200px">
+                <select id="store-usecase" onchange="loadStore()">
+                    <option value="agent">🤖 Agent (default)</option>
+                    <option value="coding">💻 Coding</option>
+                    <option value="analysis">🔍 Analysis</option>
+                </select>
+                <select id="store-min-score" onchange="filterStore()">
+                    <option value="0">Any quality</option>
+                    <option value="3">≥ 3 stars</option>
+                    <option value="4">≥ 4 stars</option>
+                    <option value="5">5 stars only</option>
+                </select>
+            </div>
+
+            <div id="store-body">
+                <p style="color:#8b949e">Loading catalog...</p>
+            </div>
         </div>
 
         <div class="card">
@@ -517,6 +571,138 @@
             btn.disabled = false;
             refresh();
         }
+        // ---- Model Store ----
+        let storeCatalog = [];
+        let storeTab = 'recommended';
+
+        function starsHtml(n) {
+            return '<span class="stars">' + '★'.repeat(n) + '☆'.repeat(5 - n) + '</span>';
+        }
+
+        function compatBadge(compat) {
+            const map = {
+                fits_gpu: '<span class="badge badge-gpu">✅ GPU</span>',
+                hybrid: '<span class="badge badge-hybrid">⚡ Hybrid</span>',
+                fits_ram: '<span class="badge badge-cpu">💻 CPU</span>',
+                tight_ram: '<span class="badge badge-tight">⚠️ Tight RAM</span>',
+            };
+            return map[compat] || '<span class="badge">?</span>';
+        }
+
+        function runtimeIcon(runtime) {
+            return { gpu: '🎮', hybrid: '⚡', cpu: '💻' }[runtime] || '?';
+        }
+
+        function renderStoreCard(m) {
+            const scores = m.scores || {};
+            const useCase = document.getElementById('store-usecase').value;
+            const primaryScore = scores[useCase] || scores.coding || 0;
+            const installedClass = m.installed ? ' installed' : '';
+            const installedBadge = m.installed ? ' <span class="badge badge-gpu">installed</span>' : '';
+            const actionBtn = m.installed
+                ? `<button onclick="useOllama('${m.ollama_tag}')" style="padding:0.3rem 0.8rem;font-size:0.85rem;background:var(--green)">▶ Use</button>`
+                : `<button onclick="pullModel('${m.ollama_tag}')" style="padding:0.3rem 0.8rem;font-size:0.85rem">⬇ Pull</button>`;
+            const tags = (m.tags || []).map(t => `<span class="badge-tag">${t}</span>`).join('');
+
+            return `<div class="store-card${installedClass}">
+                <div class="store-header">
+                    <div style="flex:1">
+                        <div class="store-name">${m.name}${installedBadge}</div>
+                        <div class="store-meta">
+                            ${compatBadge(m.compat)}
+                            <span class="badge" style="background:var(--border);color:var(--text)">${m.params}</span>
+                            <span class="badge" style="background:var(--border);color:var(--text)">${m.quant}</span>
+                            <span style="font-size:0.8rem;color:#8b949e">${m.size_gb} GB</span>
+                            <span style="font-size:0.8rem;color:#8b949e">ctx: ${(m.context_max/1024).toFixed(0)}K</span>
+                        </div>
+                    </div>
+                    <div style="text-align:right">
+                        ${starsHtml(primaryScore)}
+                        <div style="margin-top:0.3rem">${actionBtn}</div>
+                    </div>
+                </div>
+                <div class="store-desc">${m.description}</div>
+                ${m.notes ? `<div class="store-notes">${m.notes}</div>` : ''}
+                <div class="store-scores">
+                    <div class="store-score">Coding: <span>${starsHtml(scores.coding || 0)}</span></div>
+                    <div class="store-score">Agent: <span>${starsHtml(scores.agent || 0)}</span></div>
+                    <div class="store-score">Analysis: <span>${starsHtml(scores.analysis || 0)}</span></div>
+                </div>
+                <div style="margin-top:0.4rem">${tags}</div>
+            </div>`;
+        }
+
+        async function loadStore() {
+            const useCase = document.getElementById('store-usecase').value;
+            try {
+                const data = await fetch(`/api/model-store/catalog`).then(r => r.json());
+                storeCatalog = data.catalog || [];
+                // Sort by recommendation score
+                const scoreKey = useCase;
+                const rtOrder = { gpu: 0, hybrid: 1, cpu: 2 };
+                storeCatalog.sort((a, b) => {
+                    const sa = (a.scores || {})[scoreKey] || 0;
+                    const sb = (b.scores || {})[scoreKey] || 0;
+                    if (sb !== sa) return sb - sa;
+                    return (rtOrder[a.runtime] || 3) - (rtOrder[b.runtime] || 3);
+                });
+                filterStore();
+            } catch (e) {
+                document.getElementById('store-body').innerHTML = '<p style="color:var(--red)">Failed to load catalog.</p>';
+            }
+        }
+
+        function filterStore() {
+            const query = (document.getElementById('store-search').value || '').toLowerCase();
+            const minScore = parseInt(document.getElementById('store-min-score').value) || 0;
+            const useCase = document.getElementById('store-usecase').value;
+
+            let filtered = storeCatalog;
+
+            // Tab filter
+            if (storeTab === 'recommended') {
+                filtered = filtered.filter(m => (m.tags || []).includes('recommended') || (m.scores || {})[useCase] >= 4);
+            } else if (storeTab === 'gpu') {
+                filtered = filtered.filter(m => m.runtime === 'gpu');
+            } else if (storeTab === 'hybrid') {
+                filtered = filtered.filter(m => m.runtime === 'hybrid');
+            } else if (storeTab === 'cpu') {
+                filtered = filtered.filter(m => m.runtime === 'cpu');
+            }
+
+            // Search filter
+            if (query) {
+                filtered = filtered.filter(m =>
+                    m.name.toLowerCase().includes(query) ||
+                    m.description.toLowerCase().includes(query) ||
+                    m.ollama_tag.toLowerCase().includes(query) ||
+                    (m.tags || []).some(t => t.includes(query))
+                );
+            }
+
+            // Score filter
+            if (minScore > 0) {
+                filtered = filtered.filter(m => (m.scores || {})[useCase] >= minScore);
+            }
+
+            const body = document.getElementById('store-body');
+            if (filtered.length === 0) {
+                body.innerHTML = '<p style="color:#8b949e">No models match your filters.</p>';
+            } else {
+                body.innerHTML = filtered.map(renderStoreCard).join('');
+            }
+        }
+
+        function switchStoreTab(tab) {
+            storeTab = tab;
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.textContent.toLowerCase().includes(tab === 'all' ? 'all' : tab === 'recommended' ? 'recommend' : tab));
+            });
+            filterStore();
+        }
+
+        loadStore();
+
         function clearChat() {
             document.getElementById('chat-messages').innerHTML = '<div style="color:#8b949e;font-style:italic">Start chatting with codator...</div>';
         }

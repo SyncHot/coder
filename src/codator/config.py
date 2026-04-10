@@ -25,7 +25,7 @@ else:
 
 class InferenceConfig(BaseModel):
     model_path: str = ""
-    context_size: int = 8192
+    context_size: int = 32768
     max_tokens: int = 2048
     temperature: float = 0.3
     n_gpu_layers: int = -1

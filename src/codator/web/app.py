@@ -344,6 +344,50 @@ def _register_routes(app: FastAPI):
             "final_success": result.final_success,
         }
 
+    @app.get("/api/model-store/catalog")
+    async def model_store_catalog(request: Request):
+        """Full curated model catalog with compatibility info."""
+        from codator.core.model_catalog import get_catalog
+        from codator.infrastructure.ollama_backend import OllamaBackend
+
+        catalog = get_catalog()
+
+        # Mark which models are already installed
+        try:
+            backend = OllamaBackend(_engine._settings)
+            installed = await backend.list_models()
+            await backend.close()
+            installed_names = {m["name"] for m in installed}
+        except Exception:
+            installed_names = set()
+
+        for entry in catalog:
+            entry["installed"] = entry["ollama_tag"] in installed_names
+
+        return {"catalog": catalog}
+
+    @app.get("/api/model-store/recommendations")
+    async def model_store_recs(request: Request):
+        """Top recommendations for a use case."""
+        from codator.core.model_catalog import get_recommendations
+
+        use_case = request.query_params.get("use_case", "agent")
+        recs = get_recommendations(use_case)
+        return {"recommendations": recs, "use_case": use_case}
+
+    @app.get("/api/model-store/search")
+    async def model_store_search(request: Request):
+        """Search the catalog."""
+        from codator.core.model_catalog import search_catalog
+
+        q = request.query_params.get("q", "")
+        tag = request.query_params.get("tag", "")
+        runtime = request.query_params.get("runtime", "")
+        min_coding = int(request.query_params.get("min_coding", 0))
+        min_agent = int(request.query_params.get("min_agent", 0))
+        results = search_catalog(q, tag, runtime, min_coding, min_agent)
+        return {"results": results}
+
     @app.get("/api/context-index/stats")
     async def context_index_stats():
         """Contextual index statistics."""
