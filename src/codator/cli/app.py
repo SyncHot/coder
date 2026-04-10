@@ -112,20 +112,34 @@ async def async_main():
         result = await engine.start_web()
         print_info(result)
 
-    # Dynamic bottom toolbar callable
+    # Dynamic right prompt — model + mode (shown on same line as input)
+    def _rprompt():
+        model_name = engine.active_model or "no model"
+        # Shorten long model names for display
+        short = model_name
+        if len(short) > 35:
+            short = short[:32] + "…"
+        mode_label = "🤖 AGENT" if engine.mode == "agent" else "💬 CHAT"
+        return HTML(f'<style fg="ansicyan">{short}</style> │ <b>{mode_label}</b>')
+
+    # Dynamic bottom toolbar — context bar
     def _toolbar():
         ctx = engine.context_status
-        mode_label = "🤖 AGENT" if engine.mode == "agent" else "💬 CHAT"
         if not ctx:
-            return HTML(
-                f'<b>{mode_label}</b> │ <b>{engine.active_model or "no model"}</b>'
-            )
+            return HTML('<style fg="ansiwhite" bg="ansiblack"> codator </style>')
 
         total = ctx.get("total_tokens", 0)
         window = ctx.get("context_window", 1)
         pct = ctx.get("usage_percent", 0)
         msgs = ctx.get("message_count", 0)
         compactions = ctx.get("compaction_count", 0)
+        num_ctx = ctx.get("num_ctx", window)
+
+        # Friendly token format
+        def _fmt(n: int) -> str:
+            return f"{n / 1000:.1f}K" if n >= 1000 else str(n)
+
+        remaining = max(0, window - total)
 
         # Color based on usage
         if pct >= 80:
@@ -135,33 +149,45 @@ async def async_main():
         else:
             color = "ansigreen"
 
-        # Context bar (10 chars wide)
-        filled = int(pct / 10)
-        bar = "█" * filled + "░" * (10 - filled)
+        # Context bar (12 chars wide)
+        filled = int(pct / (100 / 12))
+        bar = "█" * filled + "░" * (12 - filled)
 
         parts = [
-            f'<b>{mode_label}</b>',
-            f'<b>{engine.active_model or "no model"}</b>',
-            f'<{color}>[{bar}] {pct:.0f}%</{color}>',
-            f'{total:,}/{window:,} tokens',
+            f' <{color}>[{bar}]</{color}> <b>{pct:.0f}%</b>',
+            f'{_fmt(total)} used',
+            f'{_fmt(remaining)} free',
+            f'ctx {_fmt(num_ctx)}',
             f'{msgs} msgs',
         ]
         if compactions > 0:
-            parts.append(f'⚡{compactions} compactions')
+            parts.append(f'⚡{compactions}')
 
         return HTML(" │ ".join(parts))
+
+    # Prompt style
+    from prompt_toolkit.styles import Style as PtStyle
+    prompt_style = PtStyle.from_dict({
+        "bottom-toolbar": "bg:#1a1a2e #e0e0e0",
+        "rprompt": "fg:#888888",
+    })
 
     # Interactive prompt session
     session: PromptSession = PromptSession(
         history=InMemoryHistory(),
         completer=command_completer,
         bottom_toolbar=_toolbar,
+        rprompt=_rprompt,
+        style=prompt_style,
     )
 
     try:
         while True:
             try:
-                prompt_prefix = "agent> " if engine.mode == "agent" else "you> "
+                if engine.mode == "agent":
+                    prompt_prefix = HTML('<b><style fg="ansimagenta">agent</style></b><style fg="ansiwhite">❯ </style>')
+                else:
+                    prompt_prefix = HTML('<b><style fg="ansigreen">you</style></b><style fg="ansiwhite">❯ </style>')
                 # prompt_toolkit is sync; run in executor
                 user_input = await asyncio.get_running_loop().run_in_executor(
                     None,
@@ -212,7 +238,7 @@ async def async_main():
                     )
 
                 # Show context status line after each response
-                print_context_line(ctx_after, engine.active_model)
+                # (skip — bottom toolbar shows this permanently)
 
             except FileNotFoundError as exc:
                 print_error(str(exc))

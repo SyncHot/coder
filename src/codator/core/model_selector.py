@@ -151,7 +151,7 @@ class ModelSelector:
 
     # Maximum context each model can handle (tokens)
     _MAX_CTX: dict[str, int] = {
-        "qwen2.5-coder:1.5b": 4_096,
+        "qwen2.5-coder:1.5b": 32_768,
         "qwen2.5-coder:7b": 32_768,
         "qwen2.5-coder:14b-instruct-q6_K": 32_768,
         "qwen2.5-coder:32b-instruct-q3_K_M": 32_768,

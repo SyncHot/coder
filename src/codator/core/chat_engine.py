@@ -345,13 +345,15 @@ class ChatEngine:
             current_tokens = self._context.total_tokens()
             choice = self._model_selector.select_model(user_input, current_tokens)
             if choice.model_name != self._active_model:
-                self._backend.switch_model(choice.model_name, choice.num_ctx)
+                # Use hw-aware context resolution instead of static _MAX_CTX
+                num_ctx = await self._resolve_num_ctx(choice.model_name)
+                self._backend.switch_model(choice.model_name, num_ctx=num_ctx)
                 self._active_model = choice.model_name
                 if self._context:
-                    self._context._context_window = choice.num_ctx
+                    self._context._context_window = num_ctx
                 logger.info(
                     "Auto-switched to %s (num_ctx=%d)",
-                    choice.model_name, choice.num_ctx,
+                    choice.model_name, num_ctx,
                 )
 
         # Inject relevant code context as ephemeral system message
