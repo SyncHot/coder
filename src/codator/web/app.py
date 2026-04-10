@@ -67,6 +67,7 @@ def _register_routes(app: FastAPI):
         hw, recs = check_hardware()
         return {
             "model": _engine.active_model if _engine else "none",
+            "auto_select": _engine.auto_select_enabled if _engine else False,
             "context": _engine.context_status if _engine else {},
             "hardware": {
                 "gpu": hw.gpu_name,
@@ -189,6 +190,14 @@ def _register_routes(app: FastAPI):
             return JSONResponse({"error": "model required"}, status_code=400)
         result = await _engine.switch_ollama_model(model)
         return {"status": result, "model": _engine.active_model}
+
+    @app.post("/api/auto-select")
+    async def toggle_auto_select(request: Request):
+        """Enable or disable automatic model selection."""
+        data = await request.json()
+        enabled = data.get("enabled", True)
+        result = _engine.set_auto_select(enabled)
+        return {"status": result, "auto_select": _engine.auto_select_enabled}
 
     @app.post("/api/ollama/pull")
     async def ollama_pull(request: Request):

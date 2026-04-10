@@ -46,6 +46,13 @@
             <div class="card">
                 <h2>Active Model</h2>
                 <div class="stat"><span class="stat-label">Model</span><span class="stat-value" id="model-name">—</span></div>
+                <div class="stat">
+                    <span class="stat-label">Auto-select</span>
+                    <span class="stat-value">
+                        <span id="auto-select-status" style="font-size:0.85rem">—</span>
+                        <button id="auto-select-btn" onclick="toggleAutoSelect()" style="padding:0.15rem 0.5rem;font-size:0.8rem;margin-left:0.4rem">Toggle</button>
+                    </span>
+                </div>
                 <div class="input-group">
                     <input type="text" id="model-path" placeholder="/path/to/model.gguf">
                     <button onclick="switchModel()">Load</button>
@@ -168,6 +175,20 @@
                 ]);
                 // Model
                 document.getElementById('model-name').textContent = status.model || 'none';
+                // Auto-select status
+                const autoEl = document.getElementById('auto-select-status');
+                const autoBtn = document.getElementById('auto-select-btn');
+                if (status.auto_select) {
+                    autoEl.textContent = 'ON';
+                    autoEl.style.color = 'var(--green)';
+                    autoBtn.textContent = 'Disable';
+                    autoBtn.style.background = 'var(--border)';
+                } else {
+                    autoEl.textContent = 'OFF (manual)';
+                    autoEl.style.color = 'var(--yellow)';
+                    autoBtn.textContent = 'Enable';
+                    autoBtn.style.background = 'var(--accent)';
+                }
                 // Context
                 const ctx = status.context || {};
                 const pct = ctx.usage_percent || 0;
@@ -216,6 +237,13 @@
             const res = await fetch('/api/provider', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({provider}) });
             const data = await res.json();
             alert(data.status || data.error);
+            refresh();
+        }
+        async function toggleAutoSelect() {
+            const statusEl = document.getElementById('auto-select-status');
+            const isOn = statusEl.textContent.trim() === 'ON';
+            const res = await fetch('/api/auto-select', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: !isOn}) });
+            const data = await res.json();
             refresh();
         }
         refresh();

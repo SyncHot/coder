@@ -124,6 +124,7 @@ class ChatEngine:
         self._confirm_callback: ConfirmCallback | None = None
         self._message_count: int = 0
         self._system_refresh_interval: int = 10
+        self._manual_model_override: bool = False
 
     # ----- Lifecycle -----
 
@@ -319,8 +320,12 @@ class ChatEngine:
         if self._message_count % self._system_refresh_interval == 0:
             self._refresh_system_prompt()
 
-        # Auto-select model if model selector is available
-        if self._model_selector and isinstance(self._backend, OllamaBackend):
+        # Auto-select model if model selector is available (skip if user manually chose)
+        if (
+            self._model_selector
+            and isinstance(self._backend, OllamaBackend)
+            and not self._manual_model_override
+        ):
             current_tokens = self._context.total_tokens()
             choice = self._model_selector.select_model(user_input, current_tokens)
             if choice.model_name != self._active_model:
@@ -570,7 +575,7 @@ class ChatEngine:
             return f"Failed to load {model_path}: {exc}"
 
     async def switch_to_api(self, provider: str) -> str:
-        """Switch to a cloud API backend."""
+        """Switch to a cloud API backend (disables auto-selection)."""
         await self._backend.close()
         if provider == "claude":
             self._backend = ClaudeBackend(self._settings)
@@ -583,16 +588,18 @@ class ChatEngine:
             self._active_model = self._settings.ollama.model
         else:
             return f"Unknown provider: {provider}"
+        self._manual_model_override = True
         return f"Switched to API: {self._active_model}"
 
     async def switch_ollama_model(self, model: str) -> str:
-        """Switch to a specific Ollama model."""
+        """Switch to a specific Ollama model (disables auto-selection)."""
         if isinstance(self._backend, OllamaBackend):
             self._backend.switch_model(model)
         else:
             await self._backend.close()
             self._backend = OllamaBackend(self._settings, model=model)
         self._active_model = model
+        self._manual_model_override = True
         return f"Switched to Ollama model: {model}"
 
     # ----- State -----
@@ -600,6 +607,16 @@ class ChatEngine:
     @property
     def active_model(self) -> str:
         return self._active_model
+
+    @property
+    def auto_select_enabled(self) -> bool:
+        return not self._manual_model_override
+
+    def set_auto_select(self, enabled: bool) -> str:
+        """Enable or disable automatic model selection."""
+        self._manual_model_override = not enabled
+        state = "enabled" if enabled else "disabled"
+        return f"Auto model selection {state}"
 
     @property
     def model_selector(self) -> ModelSelector | None:
