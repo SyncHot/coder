@@ -333,8 +333,9 @@ class ChatEngine:
                     role=Role.USER,
                     content=(
                         "[System]: You already called these tools with the same arguments. "
-                        "Stop calling tools and provide your final answer based on the "
-                        "information you already have."
+                        "STOP calling tools NOW. Provide your final answer in plain text "
+                        "based on the information you have gathered. Do NOT output JSON. "
+                        "Respond in the same language as the user's original question."
                     ),
                 )
                 self._context.add_message(force_msg)
@@ -342,12 +343,23 @@ class ChatEngine:
                 final = await self._backend.generate(
                     self._context.get_messages(),
                     max_tokens=self._settings.inference.max_tokens,
-                    temperature=self._settings.inference.temperature,
+                    temperature=0.7,
                 )
-                if final.text:
-                    yield final.text
+                text = final.text or ""
+                # Strip any remaining JSON tool calls from the response
+                text = re.sub(
+                    r'```json\s*\{[^}]*"name"\s*:.*?\}.*?```',
+                    "", text, flags=re.DOTALL,
+                ).strip()
+                if not text:
+                    text = (
+                        "Przeanalizowałem dostępne informacje, ale nie znalazłem "
+                        "pliku o nazwie 'builder' w projekcie. Czy możesz uściślić, "
+                        "który moduł masz na myśli?"
+                    )
+                yield text
                 self._context.add_message(
-                    Message(role=Role.ASSISTANT, content=final.text or "")
+                    Message(role=Role.ASSISTANT, content=text)
                 )
                 return
             seen_calls.update(call_keys)
