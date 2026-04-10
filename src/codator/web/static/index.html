@@ -84,13 +84,21 @@
         <div class="card">
             <h2>Recommended Models</h2>
             <table class="rec-table">
-                <thead><tr><th>Model</th><th>Params</th><th>Quant</th><th>Mode</th><th>Est. VRAM</th></tr></thead>
+                <thead><tr><th>Model</th><th>Params</th><th>Quant</th><th>Mode</th><th>Est. VRAM</th><th></th></tr></thead>
                 <tbody id="rec-body"></tbody>
             </table>
         </div>
 
         <div class="card">
             <h2>🦙 Ollama Models</h2>
+            <div class="input-group" style="margin-bottom:0.8rem">
+                <input type="text" id="pull-model-name" placeholder="Model tag to pull, e.g. qwen2.5-coder:7b" style="flex:2">
+                <button onclick="pullModel(document.getElementById('pull-model-name').value)" id="pull-custom-btn">⬇ Pull</button>
+            </div>
+            <div id="pull-progress" style="display:none;margin-bottom:0.8rem">
+                <div style="color:var(--accent);font-size:0.85rem" id="pull-status-text">Pulling...</div>
+                <div class="bar-container"><div class="bar-fill bar-green" id="pull-bar" style="width:0%">0%</div></div>
+            </div>
             <table class="rec-table">
                 <thead><tr><th>Model</th><th>Size</th><th>Modified</th><th></th></tr></thead>
                 <tbody id="ollama-body"><tr><td colspan="4" style="color:#8b949e">Loading...</td></tr></tbody>
@@ -190,7 +198,8 @@
                 tbody.innerHTML = '';
                 (status.recommendations || []).forEach(r => {
                     const badge = r.mode === 'full_gpu' ? 'badge-gpu' : 'badge-hybrid';
-                    tbody.innerHTML += `<tr><td>${r.name}</td><td>${r.params}</td><td>${r.quant}</td><td><span class="badge ${badge}">${r.mode}</span></td><td>${r.estimated_vram_mb.toLocaleString()} MB</td></tr>`;
+                    const pullBtn = r.ollama_tag ? `<button onclick="pullModel('${r.ollama_tag}')" style="padding:0.2rem 0.6rem;font-size:0.8rem">⬇ Pull</button>` : '';
+                    tbody.innerHTML += `<tr><td>${r.name}</td><td>${r.params}</td><td>${r.quant}</td><td><span class="badge ${badge}">${r.mode}</span></td><td>${r.estimated_vram_mb.toLocaleString()} MB</td><td>${pullBtn}</td></tr>`;
                 });
             } catch (e) { console.error('Refresh failed:', e); }
         }
@@ -228,10 +237,11 @@
                     const sizeGB = (m.size / 1073741824).toFixed(1);
                     const modified = (m.modified_at || '').slice(0, 10);
                     const isActive = m.name === active;
-                    const btn = isActive
+                    const useBtn = isActive
                         ? '<span class="badge badge-gpu">active</span>'
                         : `<button onclick="useOllama('${m.name}')" style="padding:0.2rem 0.6rem;font-size:0.8rem">Use</button>`;
-                    tbody.innerHTML += `<tr><td>${m.name}</td><td>${sizeGB} GB</td><td>${modified}</td><td>${btn}</td></tr>`;
+                    const delBtn = isActive ? '' : ` <button onclick="deleteOllama('${m.name}')" style="padding:0.2rem 0.6rem;font-size:0.8rem;background:var(--red)">✕</button>`;
+                    tbody.innerHTML += `<tr><td>${m.name}</td><td>${sizeGB} GB</td><td>${modified}</td><td>${useBtn}${delBtn}</td></tr>`;
                 });
             } catch(e) { console.error('Ollama load failed:', e); }
         }
@@ -243,6 +253,69 @@
             loadOllamaModels();
         }
         loadOllamaModels();
+
+        async function pullModel(model) {
+            if (!model) return;
+            const prog = document.getElementById('pull-progress');
+            const bar = document.getElementById('pull-bar');
+            const statusText = document.getElementById('pull-status-text');
+            prog.style.display = 'block';
+            bar.style.width = '0%'; bar.textContent = '0%';
+            statusText.textContent = `Pulling ${model}...`;
+            try {
+                const resp = await fetch('/api/ollama/pull', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({model})
+                });
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, {stream: true});
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const payload = line.slice(6).trim();
+                        if (payload === '[DONE]') {
+                            statusText.textContent = `✅ ${model} pulled successfully!`;
+                            bar.style.width = '100%'; bar.textContent = '100%';
+                            continue;
+                        }
+                        try {
+                            const d = JSON.parse(payload);
+                            if (d.error) { statusText.textContent = '❌ ' + d.error; break; }
+                            statusText.textContent = d.status || 'Downloading...';
+                            if (d.percent > 0) {
+                                bar.style.width = d.percent + '%';
+                                bar.textContent = d.percent + '%';
+                            }
+                        } catch(e) {}
+                    }
+                }
+            } catch(e) {
+                statusText.textContent = '❌ Pull failed: ' + e.message;
+            }
+            loadOllamaModels();
+            setTimeout(() => { prog.style.display = 'none'; }, 5000);
+        }
+
+        async function deleteOllama(model) {
+            if (!confirm(`Delete model ${model}?`)) return;
+            try {
+                const res = await fetch('/api/ollama/model', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({model})
+                });
+                const data = await res.json();
+                alert(data.status || data.error);
+                loadOllamaModels();
+            } catch(e) { alert('Delete failed: ' + e.message); }
+        }
 
         // GPU live monitor
         async function refreshGPU() {

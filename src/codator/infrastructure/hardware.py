@@ -114,6 +114,7 @@ class AMDHardwareProbe(HardwareProbe):
             n_gpu_layers=-1,
             estimated_vram_mb=2_200,
             description="Fast summary/compaction model (~2 GB VRAM)",
+            ollama_tag="qwen2.5-coder:3b",
         ))
 
         if vram >= 12_000:
@@ -126,6 +127,7 @@ class AMDHardwareProbe(HardwareProbe):
                 n_gpu_layers=-1,
                 estimated_vram_mb=9_500,
                 description="Primary coding model, full GPU, high quality Q8_0",
+                ollama_tag="deepseek-coder-v2:16b-lite-instruct-q8_0",
             ))
             recs.append(ModelRecommendation(
                 name="Qwen2.5-Coder-14B-Instruct",
@@ -135,6 +137,7 @@ class AMDHardwareProbe(HardwareProbe):
                 n_gpu_layers=-1,
                 estimated_vram_mb=12_500,
                 description="Larger coding model, full GPU, balanced quant",
+                ollama_tag="qwen2.5-coder:14b-instruct-q5_K_M",
             ))
 
         if vram >= 8_000 and hw.ram_free_mb >= 16_000:
@@ -146,8 +149,9 @@ class AMDHardwareProbe(HardwareProbe):
                 quant="Q4_K_M",
                 mode=InferenceMode.HYBRID,
                 n_gpu_layers=gpu_layers,
-                estimated_vram_mb=vram - 1_000,  # leave 1 GB headroom
+                estimated_vram_mb=vram - 1_000,
                 description=f"Hybrid mode: {gpu_layers} layers on GPU, rest on DDR5",
+                ollama_tag="deepseek-coder:33b-instruct-q4_K_M",
             ))
 
         return recs

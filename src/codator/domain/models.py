@@ -77,6 +77,7 @@ class ModelRecommendation:
     n_gpu_layers: int  # -1 means all layers on GPU
     estimated_vram_mb: int
     description: str
+    ollama_tag: str = ""  # e.g. "qwen2.5-coder:14b-instruct-q5_K_M"
 
 
 # ---------------------------------------------------------------------------

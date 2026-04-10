@@ -81,6 +81,7 @@ def _register_routes(app: FastAPI):
                 {
                     "name": r.name, "params": r.params, "quant": r.quant,
                     "mode": r.mode.value, "estimated_vram_mb": r.estimated_vram_mb,
+                    "ollama_tag": r.ollama_tag,
                 }
                 for r in recs
             ],
@@ -188,6 +189,94 @@ def _register_routes(app: FastAPI):
             return JSONResponse({"error": "model required"}, status_code=400)
         result = await _engine.switch_ollama_model(model)
         return {"status": result, "model": _engine.active_model}
+
+    @app.post("/api/ollama/pull")
+    async def ollama_pull(request: Request):
+        """Pull (download) an Ollama model. Streams progress via SSE."""
+        import json as json_mod
+
+        import httpx
+
+        data = await request.json()
+        model = data.get("model", "")
+        if not model:
+            return JSONResponse(
+                {"error": "model required"}, status_code=400,
+            )
+
+        ollama_url = _engine._settings.ollama.base_url.rstrip("/")
+
+        async def pull_stream():
+            try:
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{ollama_url}/api/pull",
+                        json={"name": model, "stream": True},
+                    ) as resp:
+                        async for line in resp.aiter_lines():
+                            if not line:
+                                continue
+                            try:
+                                obj = json_mod.loads(line)
+                                status = obj.get("status", "")
+                                total = obj.get("total", 0)
+                                completed = obj.get("completed", 0)
+                                pct = (
+                                    round(completed / total * 100)
+                                    if total > 0 else 0
+                                )
+                                payload = json_mod.dumps({
+                                    "status": status,
+                                    "total": total,
+                                    "completed": completed,
+                                    "percent": pct,
+                                })
+                                yield f"data: {payload}\n\n"
+                            except json_mod.JSONDecodeError:
+                                pass
+                yield "data: [DONE]\n\n"
+            except Exception as exc:
+                err = json_mod.dumps({"error": str(exc)})
+                yield f"data: {err}\n\n"
+
+        return StreamingResponse(
+            pull_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.delete("/api/ollama/model")
+    async def ollama_delete(request: Request):
+        """Delete an Ollama model."""
+        import httpx
+
+        data = await request.json()
+        model = data.get("model", "")
+        if not model:
+            return JSONResponse(
+                {"error": "model required"}, status_code=400,
+            )
+
+        ollama_url = _engine._settings.ollama.base_url.rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.delete(
+                    f"{ollama_url}/api/delete",
+                    json={"name": model},
+                )
+                if resp.status_code == 200:
+                    return {"status": f"Deleted {model}"}
+                return JSONResponse(
+                    {"error": resp.text}, status_code=resp.status_code,
+                )
+        except Exception as exc:
+            return JSONResponse(
+                {"error": str(exc)}, status_code=500,
+            )
 
     @app.get("/api/gpu/status")
     async def gpu_status():
