@@ -1,10 +1,14 @@
-"""Tests for _unescape_collapsed_code — LLM double-escaped newline fix."""
+"""Tests for LLM newline normalization — double/under-escaped newline fixes."""
 
 from __future__ import annotations
 
 import pytest
 
-from codator.core.agent_loop import _unescape_collapsed_code
+from codator.core.agent_loop import (
+    _unescape_collapsed_code,
+    _escape_broken_strings,
+    normalize_edit_text,
+)
 
 
 class TestUnescapeCollapsedCode:
@@ -116,3 +120,97 @@ class TestUnescapeCollapsedCode:
         result = _unescape_collapsed_code(text)
         assert result.startswith("import re\n")
         assert r"\d+:\d+:\d+,\d+" in result
+
+
+class TestEscapeBrokenStrings:
+    """Verify real newlines inside string literals → \\n."""
+
+    def test_no_newlines(self):
+        text = "x = 'hello'"
+        assert _escape_broken_strings(text) == text
+
+    def test_newline_in_single_quoted_string(self):
+        """Real newline inside '...' → \\n."""
+        text = "x = 'hello\nworld'"
+        assert _escape_broken_strings(text) == "x = 'hello\\nworld'"
+
+    def test_newline_in_double_quoted_string(self):
+        """Real newline inside \"...\" → \\n."""
+        text = 'x = "hello\nworld"'
+        assert _escape_broken_strings(text) == 'x = "hello\\nworld"'
+
+    def test_newline_outside_string_preserved(self):
+        """Real newlines between statements stay as-is."""
+        text = "import re\nprint('hello')"
+        assert _escape_broken_strings(text) == text
+
+    def test_strips_indentation_after_newline_in_string(self):
+        """Spurious indentation after newline inside string is stripped."""
+        text = "x = 'WEBVTT\n            ' + y"
+        assert _escape_broken_strings(text) == "x = 'WEBVTT\\n' + y"
+
+    def test_multiple_newlines_in_string(self):
+        """Multiple real newlines → multiple \\n."""
+        text = "x = 'a\n\nb'"
+        assert _escape_broken_strings(text) == "x = 'a\\n\\nb'"
+
+    def test_triple_quoted_strings_untouched(self):
+        """Real newlines in triple-quoted strings are valid — don't touch."""
+        text = "x = '''hello\nworld'''\nprint(x)"
+        assert _escape_broken_strings(text) == text
+
+    def test_mixed_strings_and_code(self):
+        """Fix strings while preserving code newlines."""
+        text = "vtt = 'WEBVTT\n\n' + '\n'.join(lines)\nreturn vtt"
+        expected = "vtt = 'WEBVTT\\n\\n' + '\\n'.join(lines)\nreturn vtt"
+        assert _escape_broken_strings(text) == expected
+
+    def test_realistic_under_escaped(self):
+        """The pattern from QA: LLM under-escaped \\n in string literals."""
+        text = (
+            "import re\n"
+            "vtt = 'WEBVTT\n"
+            "\n"
+            "' + '\n"
+            "'.join(lines)"
+        )
+        result = _escape_broken_strings(text)
+        assert "'WEBVTT\\n\\n'" in result
+        assert "'\\n'.join(lines)" in result
+        assert result.startswith("import re\n")
+
+    def test_strips_indentation_realistic(self):
+        """Indentation after newline in string is stripped (real LLM output)."""
+        text = "vtt = 'WEBVTT\n\n            ' + '\n            '.join(x)"
+        result = _escape_broken_strings(text)
+        assert "'WEBVTT\\n\\n'" in result
+        assert "'\\n'.join(x)" in result
+
+
+class TestNormalizeEditText:
+    """End-to-end: normalize_edit_text handles both cases."""
+
+    def test_double_escaped(self):
+        r"""Collapsed code with literal \n → proper multiline."""
+        text = r"import re\nx = '\n'.join(lines)"
+        result = normalize_edit_text(text)
+        assert result == "import re\nx = '\\n'.join(lines)"
+
+    def test_under_escaped(self):
+        """Broken strings with real newlines → proper escapes."""
+        text = "import re\nx = '\n'.join(lines)"
+        result = normalize_edit_text(text)
+        assert result == "import re\nx = '\\n'.join(lines)"
+
+    def test_already_correct(self):
+        """Properly formatted code passes through unchanged."""
+        text = "import re\nx = '\\n'.join(lines)"
+        result = normalize_edit_text(text)
+        assert result == text
+
+    def test_mixed_escaping(self):
+        r"""Some \n double-escaped, some under-escaped."""
+        # "import re" + literal-\n + "x = '" + real-newline + "'.join(y)"
+        text = "import re\\nx = '\n'.join(y)"
+        result = normalize_edit_text(text)
+        assert result == "import re\nx = '\\n'.join(y)"

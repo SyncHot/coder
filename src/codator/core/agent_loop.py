@@ -99,7 +99,7 @@ def safe_parse_json(raw: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# LLM newline unescape — fix double-escaped newlines in code
+# LLM newline normalization — fix double/under-escaped newlines in code
 # ---------------------------------------------------------------------------
 
 def _unescape_collapsed_code(text: str) -> str:
@@ -167,6 +167,76 @@ def _unescape_collapsed_code(text: str) -> str:
         i += 1
 
     return "".join(result)
+
+
+def _escape_broken_strings(text: str) -> str:
+    r"""Fix real newlines inside Python string literals → ``\n``.
+
+    The reverse of ``_unescape_collapsed_code``: when an LLM *under*-escapes
+    in JSON (uses ``\n`` instead of ``\\n`` for Python's escape), json.loads
+    turns them into real newlines **inside** string literals — a syntax error
+    in Python.  This converts them back to ``\n`` and strips the spurious
+    indentation whitespace that follows.
+
+    Only applies to single/double-quoted strings (triple-quoted strings
+    legitimately contain real newlines).
+    """
+    if "\n" not in text:
+        return text
+
+    result: list[str] = []
+    i = 0
+    in_str: str | None = None
+
+    while i < len(text):
+        # --- triple-quote boundaries ---
+        tri = text[i : i + 3]
+        if tri in ("'''", '"""'):
+            if in_str is None:
+                in_str = tri
+            elif in_str == tri:
+                in_str = None
+            result.append(tri)
+            i += 3
+            continue
+
+        c = text[i]
+
+        # --- escape sequences — skip both chars, don't toggle state ---
+        if c == "\\" and i + 1 < len(text):
+            result.append(c + text[i + 1])
+            i += 2
+            continue
+
+        # --- string delimiter toggle (single-char quotes) ---
+        if c in ("'", '"'):
+            if in_str is None:
+                in_str = c
+            elif in_str == c:
+                in_str = None
+
+        # --- real newline inside single/double-quoted string → \n ---
+        if c == "\n" and in_str is not None and len(in_str) == 1:
+            result.append("\\n")
+            i += 1
+            # Skip indentation whitespace injected by the code structure
+            while i < len(text) and text[i] in (" ", "\t"):
+                i += 1
+            continue
+
+        result.append(c)
+        i += 1
+
+    return "".join(result)
+
+
+def normalize_edit_text(text: str) -> str:
+    """Apply both newline normalization passes to LLM-generated code.
+
+    1. ``_unescape_collapsed_code``:  literal ``\\n`` → real newlines outside strings
+    2. ``_escape_broken_strings``:    real newlines  → ``\\n`` inside string literals
+    """
+    return _escape_broken_strings(_unescape_collapsed_code(text))
 
 
 # ---------------------------------------------------------------------------
@@ -802,9 +872,9 @@ class PlanActVerifyAgent:
         old_text = edit_info.get("old") or edit_info.get("old_text") or edit_info.get("original") or ""
         new_text = edit_info.get("new") or edit_info.get("new_text") or edit_info.get("replacement") or ""
 
-        # Fix LLM double-escaped newlines (literal \n → real newlines in code)
-        old_text = _unescape_collapsed_code(old_text)
-        new_text = _unescape_collapsed_code(new_text)
+        # Fix LLM double/under-escaped newlines (literal \n ↔ real newlines)
+        old_text = normalize_edit_text(old_text)
+        new_text = normalize_edit_text(new_text)
 
         if not old_text:
             raise ValueError("Missing 'old' field in edit_file description JSON")
@@ -957,9 +1027,9 @@ class PlanActVerifyAgent:
         corrected_new = corrected.get("new", "")
         error = corrected.get("error", "")
 
-        # Fix LLM double-escaped newlines
-        corrected_old = _unescape_collapsed_code(corrected_old)
-        corrected_new = _unescape_collapsed_code(corrected_new)
+        # Fix LLM double/under-escaped newlines
+        corrected_old = normalize_edit_text(corrected_old)
+        corrected_new = normalize_edit_text(corrected_new)
 
         if error or not corrected_old:
             raise ValueError(
