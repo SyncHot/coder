@@ -460,10 +460,14 @@ class PlanActVerifyAgent:
                 val = s.get(key, "")
                 if val and isinstance(val, str):
                     candidate = val.strip().lower()
-                    # Only accept if it's a short action-like value,
-                    # not a prose sentence (those are descriptions)
-                    if len(candidate.split()) <= 3:
+                    words = candidate.split()
+                    if len(words) <= 3:
                         action = candidate
+                        break
+                    # Long prose in action field — try to extract the
+                    # first verb/word and use it as a short action hint
+                    if len(words) > 3 and words[0]:
+                        action = words[0]
                         break
 
             # Normalise common LLM aliases to valid actions
@@ -477,22 +481,41 @@ class PlanActVerifyAgent:
                 "check": "analyze",
                 "inspect": "analyze",
                 "examine": "analyze",
+                "identify": "analyze",
                 "look": "read_file",
                 "view": "read_file",
                 "modify": "edit_file",
                 "update": "edit_file",
                 "change": "edit_file",
+                "fix": "edit_file",
+                "implement": "edit_file",
+                "complete": "edit_file",
+                "add": "edit_file",
+                "optimize": "edit_file",
+                "refactor": "edit_file",
+                "replace": "edit_file",
+                "resolve": "edit_file",
+                "correct": "edit_file",
+                "patch": "edit_file",
+                "rewrite": "edit_file",
+                "configure": "edit_file",
                 "write": "create_file",
                 "remove": "delete_file",
                 "execute": "run_command",
                 "shell": "run_command",
-                "save": "",  # skip no-op steps
+                "test": "run_command",
+                "run": "run_command",
+                "re-run": "run_command",
+                "save": "",
                 "commit": "",
                 "navigate": "",
-                "ensure": "",
-                "verify permissions": "",
-                "check test environment": "",
-                "update dependencies": "",
+                "ensure": "analyze",
+                "verify": "analyze",
+                "validate": "analyze",
+                "confirm": "analyze",
+                "verify permissions": "run_command",
+                "check test environment": "run_command",
+                "update dependencies": "run_command",
             }
             action = _action_aliases.get(action, action)
 
@@ -554,14 +577,14 @@ class PlanActVerifyAgent:
         combined = " ".join(texts).lower()
 
         _verb_map = [
-            (r"\bread\b", "read_file"),
-            (r"\banalyze\b|\banalysis\b|\breview\b|\bcheck\b|\binspect\b", "analyze"),
-            (r"\bgrep\b|\bsearch\b|\bfind occurrences\b", "grep"),
-            (r"\bglob\b|\bfind files\b|\blist files\b", "glob"),
-            (r"\bedit\b|\bmodify\b|\bchange\b|\bupdate\b|\breplace\b|\brefactor\b", "edit_file"),
-            (r"\bcreate\b|\bwrite new\b", "create_file"),
+            (r"\bread\b|\bopen\b|\bview\b|\blook at\b", "read_file"),
+            (r"\banalyze\b|\banalysis\b|\breview\b|\binspect\b|\bidentify\b|\bensure\b|\bverify\b|\bvalidate\b|\bconfirm\b|\bcheck\b", "analyze"),
+            (r"\bgrep\b|\bsearch\b|\bfind occurrences\b|\bscan\b", "grep"),
+            (r"\bglob\b|\bfind files\b|\blist files\b|\blist directory\b", "glob"),
+            (r"\bedit\b|\bmodify\b|\bchange\b|\bupdate\b|\breplace\b|\brefactor\b|\bfix\b|\bimplement\b|\bcomplete\b|\badd\b|\boptimize\b|\bresolve\b|\bcorrect\b|\bpatch\b|\brewrite\b|\bconfigure\b", "edit_file"),
+            (r"\bcreate\b|\bwrite new\b|\bgenerate\b", "create_file"),
             (r"\bdelete\b|\bremove file\b", "delete_file"),
-            (r"\brun\b|\bexecute\b|\binstall\b|\bchmod\b|\bpip\b|\bnpm\b", "run_command"),
+            (r"\brun\b|\bexecute\b|\binstall\b|\bchmod\b|\bpip\b|\bnpm\b|\btest\b|\bre-run\b|\bpermission\b", "run_command"),
         ]
         for pattern, action in _verb_map:
             if re.search(pattern, combined):
