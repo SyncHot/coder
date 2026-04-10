@@ -99,6 +99,77 @@ def safe_parse_json(raw: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# LLM newline unescape — fix double-escaped newlines in code
+# ---------------------------------------------------------------------------
+
+def _unescape_collapsed_code(text: str) -> str:
+    r"""Convert literal ``\n`` to real newlines in LLM-generated code.
+
+    LLMs often double-escape newlines in JSON edit descriptions, producing
+    code collapsed to a single line with literal ``\n``.  This converts
+    ``\n`` → real newline ONLY when **outside** Python string literals,
+    preserving ``\n`` inside strings where it belongs (e.g. ``'\n'.join(…)``).
+
+    Also handles ``\t`` outside strings → real tab.
+    """
+    if "\\n" not in text and "\\t" not in text:
+        return text
+
+    result: list[str] = []
+    i = 0
+    in_str: str | None = None  # None, or the quote delimiter ("'", '"', "'''", '"""')
+
+    while i < len(text):
+        # --- triple-quote boundaries (must check before single-quote) ---
+        tri = text[i : i + 3]
+        if tri in ("'''", '"""'):
+            if in_str is None:
+                in_str = tri
+            elif in_str == tri:
+                in_str = None
+            result.append(tri)
+            i += 3
+            continue
+
+        c = text[i]
+
+        # --- escape sequences ---
+        if c == "\\" and i + 1 < len(text):
+            nc = text[i + 1]
+            if nc == "n":
+                # \n outside string → real newline; inside → keep literal
+                result.append("\\n" if in_str else "\n")
+                i += 2
+                continue
+            if nc == "t":
+                result.append("\\t" if in_str else "\t")
+                i += 2
+                continue
+            if nc in ("\\", "'", '"'):
+                # Escaped backslash or quote — keep as-is, skip both chars
+                result.append(c + nc)
+                i += 2
+                continue
+            # Other \X (e.g. \d in regex) — keep as-is
+            result.append(c + nc)
+            i += 2
+            continue
+
+        # --- string delimiter toggle (single-char quotes) ---
+        if c in ("'", '"'):
+            if in_str is None:
+                in_str = c
+            elif in_str == c:
+                in_str = None
+            # else: different quote type inside a string → just a character
+
+        result.append(c)
+        i += 1
+
+    return "".join(result)
+
+
+# ---------------------------------------------------------------------------
 # Environment error classification for smart verification
 # ---------------------------------------------------------------------------
 
@@ -730,6 +801,11 @@ class PlanActVerifyAgent:
         file_rel = edit_info.get("file", step.target)
         old_text = edit_info.get("old") or edit_info.get("old_text") or edit_info.get("original") or ""
         new_text = edit_info.get("new") or edit_info.get("new_text") or edit_info.get("replacement") or ""
+
+        # Fix LLM double-escaped newlines (literal \n → real newlines in code)
+        old_text = _unescape_collapsed_code(old_text)
+        new_text = _unescape_collapsed_code(new_text)
+
         if not old_text:
             raise ValueError("Missing 'old' field in edit_file description JSON")
 
@@ -880,6 +956,10 @@ class PlanActVerifyAgent:
         corrected_old = corrected.get("old", "")
         corrected_new = corrected.get("new", "")
         error = corrected.get("error", "")
+
+        # Fix LLM double-escaped newlines
+        corrected_old = _unescape_collapsed_code(corrected_old)
+        corrected_new = _unescape_collapsed_code(corrected_new)
 
         if error or not corrected_old:
             raise ValueError(
