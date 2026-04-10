@@ -26,8 +26,8 @@ dependencies = [
     # Context & tokenizer
     "tiktoken>=0.8.0",
     # Project indexing
-    "tree-sitter>=0.21.0,<0.23.0",
-    "tree-sitter-languages>=1.10.0",
+    "tree-sitter>=0.21.0,<0.22.0",
+    "tree-sitter-languages>=1.9.0,<1.10.0",
     # Git
     "gitpython>=3.1.43",
     # Config

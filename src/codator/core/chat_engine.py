@@ -10,6 +10,7 @@ from codator.config import AppSettings, get_settings
 from codator.core.context_manager import AdaptiveContextManager
 from codator.core.git_integration import GitContext
 from codator.core.project_indexer import TreeSitterProjectIndexer
+from codator.domain.interfaces import InferenceBackend
 from codator.domain.models import GenerationResult, Message, ProjectMap, Role
 from codator.infrastructure.api_clients import ClaudeBackend, OpenAIBackend
 from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
