@@ -189,7 +189,11 @@ def _register_routes(app: FastAPI):
         if not model:
             return JSONResponse({"error": "model required"}, status_code=400)
         result = await _engine.switch_ollama_model(model)
-        return {"status": result, "model": _engine.active_model}
+        return {
+            "status": result,
+            "model": _engine.active_model,
+            "context": _engine.context_status,
+        }
 
     @app.post("/api/auto-select")
     async def toggle_auto_select(request: Request):

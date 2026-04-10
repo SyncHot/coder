@@ -5,8 +5,8 @@ version = "0.1.0"
 [inference]
 # Default local model path (GGUF format)
 model_path = ""
-# Context window size (tokens)
-context_size = 32768
+# Context window upper limit (tokens) — actual num_ctx is per-model and hw-aware
+context_size = 131072
 # Max tokens to generate
 max_tokens = 2048
 # Temperature

@@ -25,7 +25,7 @@ else:
 
 class InferenceConfig(BaseModel):
     model_path: str = ""
-    context_size: int = 32768
+    context_size: int = 131072  # max allowed; actual num_ctx is per-model (hw-aware)
     max_tokens: int = 2048
     temperature: float = 0.3
     n_gpu_layers: int = -1

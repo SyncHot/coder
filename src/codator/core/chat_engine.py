@@ -154,6 +154,17 @@ class ChatEngine:
         if isinstance(self._backend, OllamaBackend):
             await self._init_model_selector()
 
+        # Resolve actual num_ctx for the initial model (query Ollama metadata)
+        initial_ctx = self._settings.inference.context_size
+        if isinstance(self._backend, OllamaBackend):
+            resolved = await self._resolve_num_ctx(self._active_model)
+            if resolved:
+                initial_ctx = resolved
+                self._backend._num_ctx = resolved
+                logger.info(
+                    "Initial model %s: num_ctx=%d", self._active_model, resolved,
+                )
+
         # Initialize contextual index
         try:
             self._contextual_index = ContextualIndex(self._project_root)
@@ -188,7 +199,7 @@ class ChatEngine:
 
         # Context manager
         self._context = AdaptiveContextManager(
-            context_window=self._settings.inference.context_size,
+            context_window=initial_ctx,
             config=self._settings.context,
             primary_backend=self._backend,
             summary_backend=self._summary_backend,
@@ -336,6 +347,8 @@ class ChatEngine:
             if choice.model_name != self._active_model:
                 self._backend.switch_model(choice.model_name, choice.num_ctx)
                 self._active_model = choice.model_name
+                if self._context:
+                    self._context._context_window = choice.num_ctx
                 logger.info(
                     "Auto-switched to %s (num_ctx=%d)",
                     choice.model_name, choice.num_ctx,
@@ -599,8 +612,12 @@ class ChatEngine:
         return f"Switched to API: {self._active_model}"
 
     async def switch_ollama_model(self, model: str) -> str:
-        """Switch to a specific Ollama model (disables auto-selection)."""
-        num_ctx = self._settings.inference.context_size
+        """Switch to a specific Ollama model (disables auto-selection).
+
+        Queries Ollama for the model's native context length and uses
+        min(model_max, config_max) so we don't exceed either limit.
+        """
+        num_ctx = await self._resolve_num_ctx(model)
         if isinstance(self._backend, OllamaBackend):
             self._backend.switch_model(model, num_ctx=num_ctx)
         else:
@@ -610,7 +627,83 @@ class ChatEngine:
             )
         self._active_model = model
         self._manual_model_override = True
-        return f"Switched to Ollama model: {model}"
+        # Update context manager window to match
+        if self._context:
+            self._context._context_window = num_ctx
+        return f"Switched to Ollama model: {model} (ctx: {num_ctx:,})"
+
+    async def _resolve_num_ctx(self, model: str | None = None) -> int:
+        """Determine optimal num_ctx for a model based on hardware constraints.
+
+        Queries Ollama for the model's native context_length, then caps it
+        based on available memory (VRAM + RAM) minus the model weight footprint.
+        Each KV-cache token costs approximately *kv_bytes_per_token* bytes,
+        which varies by model size (hidden_dim × layers × 2 × 2 bytes).
+        """
+        config_max = self._settings.inference.context_size  # user upper-bound
+
+        # 1. Get model's native context length from Ollama metadata
+        model_max = 0
+        if isinstance(self._backend, OllamaBackend):
+            model_max = await self._backend.get_model_context_length(model)
+
+        # Fallback to ModelSelector static map
+        if not model_max and self._model_selector and model:
+            model_max = self._model_selector._MAX_CTX.get(model, 0)
+
+        if not model_max:
+            return config_max
+
+        # 2. Estimate safe context based on hardware
+        try:
+            from codator.infrastructure.hardware import check_hardware
+            hw, _ = check_hardware()
+            vram_mb = hw.vram_total_mb
+            ram_mb = hw.ram_total_mb
+        except Exception:
+            vram_mb, ram_mb = 16_304, 31_237  # fallback to known values
+
+        # Estimate model VRAM footprint from selector or catalog
+        model_vram_mb = 0
+        if self._model_selector and model:
+            model_vram_mb = self._model_selector.estimate_vram_mb(model)
+
+        # Total usable memory = VRAM + (RAM - 4GB for OS)
+        total_mem_mb = vram_mb + max(0, ram_mb - 4_096)
+        free_for_kv_mb = max(0, total_mem_mb - model_vram_mb - 2_048)  # 2GB headroom
+
+        # KV cache cost per token depends on model size (rough estimates)
+        # hidden_dim × num_layers × 2(K+V) × 2(bytes) per token
+        model_lower = (model or "").lower()
+        if "70b" in model_lower or "72b" in model_lower:
+            kv_bytes_per_token = 8192 * 80 * 2 * 2  # ~2.5 MB/token
+        elif "32b" in model_lower or "33b" in model_lower or "34b" in model_lower:
+            kv_bytes_per_token = 5120 * 64 * 2 * 2  # ~1.25 MB/token
+        elif "14b" in model_lower or "13b" in model_lower:
+            kv_bytes_per_token = 5120 * 40 * 2 * 2  # ~0.78 MB/token
+        elif "7b" in model_lower or "8b" in model_lower:
+            kv_bytes_per_token = 4096 * 32 * 2 * 2  # ~0.5 MB/token
+        else:
+            kv_bytes_per_token = 2048 * 24 * 2 * 2  # small models ~0.19 MB/token
+
+        kv_mb_per_token = kv_bytes_per_token / (1024 * 1024)
+        hw_safe_ctx = int(free_for_kv_mb / kv_mb_per_token) if kv_mb_per_token > 0 else config_max
+
+        # Round down to nearest 1024 for cleanliness
+        hw_safe_ctx = max(2048, (hw_safe_ctx // 1024) * 1024)
+
+        # 3. Final: min of (model native, hardware safe, config upper bound)
+        num_ctx = min(model_max, hw_safe_ctx, config_max)
+        # But never go below 4096
+        num_ctx = max(4096, num_ctx)
+
+        logger.info(
+            "Resolved num_ctx for %s: %d (model_native=%d, hw_safe=%d, config=%d, "
+            "free_mem=%dMB, model_vram=%dMB)",
+            model, num_ctx, model_max, hw_safe_ctx, config_max,
+            free_for_kv_mb, model_vram_mb,
+        )
+        return num_ctx
 
     # ----- State -----
 
@@ -683,9 +776,11 @@ class ChatEngine:
 
     @property
     def context_status(self) -> dict[str, Any]:
-        if self._context:
-            return self._context.status_dict()
-        return {}
+        status = self._context.status_dict() if self._context else {}
+        # Add num_ctx actually sent to Ollama for transparency
+        if isinstance(self._backend, OllamaBackend):
+            status["num_ctx"] = self._backend.num_ctx
+        return status
 
     async def refresh_project_context(self) -> str:
         """Re-index project and update git context."""

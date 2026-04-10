@@ -140,6 +140,30 @@ class OllamaBackend(InferenceBackend):
         self._model = model
         self._num_ctx = num_ctx
 
+    @property
+    def num_ctx(self) -> int:
+        return self._num_ctx
+
+    async def get_model_context_length(self, model: str | None = None) -> int:
+        """Query Ollama /api/show for the model's native context length."""
+        import httpx
+        model = model or self._model
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{self._base_url}/api/show",
+                    json={"name": model},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                info = resp.json().get("model_info", {})
+                for key, val in info.items():
+                    if "context_length" in key.lower():
+                        return int(val)
+        except Exception as exc:
+            logger.warning("Failed to query model context for %s: %s", model, exc)
+        return 0
+
     async def close(self) -> None:
         if self._client:
             await self._client.close()
