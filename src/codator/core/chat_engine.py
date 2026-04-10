@@ -390,19 +390,32 @@ class ChatEngine:
         # (keeps conversation history clean — retrieval context is not persisted)
         if self._contextual_index:
             try:
+                # Dynamic RAG budget: use at most 25% of remaining context
+                remaining = self._context.remaining_tokens()
+                avg_chunk_tokens = 500  # approximate tokens per code chunk
+                rag_budget = int(remaining * 0.25)
+                top_k = max(1, min(10, rag_budget // avg_chunk_tokens))
+
                 if self._contextual_index.has_embeddings:
                     chunks = await self._contextual_index.search_async(
-                        user_input, top_k=3,
+                        user_input, top_k=top_k,
                     )
                 else:
                     chunks = self._contextual_index.search(
-                        user_input, top_k=3,
+                        user_input, top_k=top_k,
                     )
                 if chunks:
                     context_block = (
                         self._contextual_index
                         .format_chunks_for_prompt(chunks)
                     )
+                    # Truncate RAG context to token budget
+                    block_tokens = self._context._count(context_block)
+                    if block_tokens > rag_budget:
+                        # Rough character-to-token ratio for truncation
+                        char_limit = int(len(context_block) * (rag_budget / block_tokens))
+                        context_block = context_block[:char_limit] + "\n... [RAG context truncated]"
+                        logger.info("RAG context truncated: %d → %d tokens", block_tokens, rag_budget)
                     ctx_msg = Message(
                         role=Role.SYSTEM,
                         content=f"Relevant code context:\n{context_block}",
@@ -415,9 +428,9 @@ class ChatEngine:
         user_msg = Message(role=Role.USER, content=user_input)
         self._context.add_message(user_msg)
 
-        await self._context.maybe_compact()
-
-        # If backend supports tool calling, use the agentic loop
+        compaction_notice = await self._context.maybe_compact()
+        if compaction_notice:
+            yield f"\n{compaction_notice}\n\n"
         if self._supports_tool_calling():
             async for token in self._agentic_chat_stream():
                 yield token

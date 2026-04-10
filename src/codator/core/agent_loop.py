@@ -529,13 +529,38 @@ class PlanActVerifyAgent:
 
     # -- verify --------------------------------------------------------------
 
-    async def verify(self, language: str = "python") -> VerifyResult:
+    def _detect_language(self) -> str:
+        """Detect primary project language from marker files."""
+        markers = {
+            "python": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"],
+            "javascript": ["package.json", "tsconfig.json"],
+            "go": ["go.mod"],
+            "rust": ["Cargo.toml"],
+        }
+        for lang, files in markers.items():
+            for f in files:
+                if (self._project_root / f).exists():
+                    return lang
+        return "python"  # default fallback
+
+    async def verify(self, language: str = "") -> VerifyResult:
         """Run linting and tests to verify project health."""
+        if not language:
+            language = self._detect_language()
+
         errors: list[str] = []
         warnings: list[str] = []
 
-        if language == "python":
-            errors, warnings = await self._verify_python()
+        verifiers = {
+            "python": self._verify_python,
+            "javascript": self._verify_javascript,
+            "go": self._verify_go,
+            "rust": self._verify_rust,
+        }
+
+        verifier = verifiers.get(language)
+        if verifier:
+            errors, warnings = await verifier()
         else:
             logger.warning("No verification rules for language %r", language)
 
@@ -583,6 +608,90 @@ class PlanActVerifyAgent:
                         errors.append(stripped)
                     elif "warning" in stripped.lower():
                         warnings.append(stripped)
+
+        return errors, warnings
+
+    async def _verify_javascript(self) -> tuple[list[str], list[str]]:
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        # --- eslint (skip if not installed) ---
+        eslint_result = await self._run_quiet("npx eslint . --format compact --no-error-on-unmatched-pattern 2>&1")
+        if eslint_result is not None:
+            if "not found" not in eslint_result and "Cannot find module" not in eslint_result:
+                for line in eslint_result.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("(") or "problem" in stripped.lower():
+                        continue
+                    if "Error" in stripped:
+                        errors.append(stripped)
+                    elif "Warning" in stripped:
+                        warnings.append(stripped)
+
+        # --- npm test / npx jest (if package.json has test script) ---
+        pkg_json = self._project_root / "package.json"
+        if pkg_json.exists():
+            import json
+            try:
+                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                if "test" in pkg.get("scripts", {}):
+                    test_result = await self._run_quiet("npm test -- --ci 2>&1")
+                    if test_result is not None:
+                        for line in test_result.splitlines():
+                            stripped = line.strip()
+                            if "FAIL" in stripped or "ERR!" in stripped:
+                                errors.append(stripped)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        return errors, warnings
+
+    async def _verify_go(self) -> tuple[list[str], list[str]]:
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        # --- go vet ---
+        vet_result = await self._run_quiet("go vet ./... 2>&1")
+        if vet_result is not None and "not found" not in vet_result:
+            for line in vet_result.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    errors.append(stripped)
+
+        # --- go test ---
+        test_result = await self._run_quiet("go test ./... -short 2>&1")
+        if test_result is not None and "not found" not in test_result:
+            for line in test_result.splitlines():
+                stripped = line.strip()
+                if "FAIL" in stripped:
+                    errors.append(stripped)
+                elif "warning" in stripped.lower():
+                    warnings.append(stripped)
+
+        return errors, warnings
+
+    async def _verify_rust(self) -> tuple[list[str], list[str]]:
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        # --- cargo check ---
+        check_result = await self._run_quiet("cargo check 2>&1")
+        if check_result is not None and "not found" not in check_result:
+            for line in check_result.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("error"):
+                    errors.append(stripped)
+                elif stripped.startswith("warning"):
+                    warnings.append(stripped)
+
+        # --- cargo test (only if cargo check passed) ---
+        if not errors:
+            test_result = await self._run_quiet("cargo test 2>&1")
+            if test_result is not None:
+                for line in test_result.splitlines():
+                    stripped = line.strip()
+                    if "FAILED" in stripped or stripped.startswith("error"):
+                        errors.append(stripped)
 
         return errors, warnings
 

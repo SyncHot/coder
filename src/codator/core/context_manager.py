@@ -88,6 +88,10 @@ class AdaptiveContextManager(ContextManager):
     def total_tokens(self) -> int:
         return sum(m.token_count for m in self._messages)
 
+    def remaining_tokens(self) -> int:
+        """Tokens still available before hitting the context window limit."""
+        return max(0, self._context_window - self.total_tokens())
+
     @property
     def usage_ratio(self) -> float:
         """Current context usage as a fraction (0.0 – 1.0)."""
@@ -107,10 +111,10 @@ class AdaptiveContextManager(ContextManager):
     def snapshots(self) -> list[ContextSnapshot]:
         return list(self._snapshots)
 
-    async def maybe_compact(self) -> bool:
-        """Check usage and compact if threshold exceeded. Returns True if compacted."""
+    async def maybe_compact(self) -> str | None:
+        """Check usage and compact if threshold exceeded. Returns notification string or None."""
         if not self.needs_compaction:
-            return False
+            return None
 
         logger.info(
             "Context compaction triggered: %d/%d tokens (%.0f%%)",
@@ -119,9 +123,9 @@ class AdaptiveContextManager(ContextManager):
         )
 
         snapshot = await self._generate_snapshot()
-        self._apply_compaction(snapshot)
+        notification = self._apply_compaction(snapshot)
         self._compaction_count += 1
-        return True
+        return notification
 
     def clear(self) -> None:
         self._messages.clear()
@@ -180,7 +184,7 @@ class AdaptiveContextManager(ContextManager):
         self._snapshots.append(snapshot)
         return snapshot
 
-    def _apply_compaction(self, snapshot: ContextSnapshot) -> None:
+    def _apply_compaction(self, snapshot: ContextSnapshot) -> str:
         """Replace conversation with [system] + [snapshot] + [last N messages]."""
         keep_n = self._config.keep_last_messages
 
@@ -207,6 +211,11 @@ class AdaptiveContextManager(ContextManager):
         logger.info(
             "Compaction complete: %d → %d tokens, kept %d messages + snapshot",
             snapshot.original_token_count, self.total_tokens(), len(kept_messages),
+        )
+        return (
+            f"⚠️ Context compacted: {snapshot.original_token_count:,} → "
+            f"{self.total_tokens():,} tokens "
+            f"({snapshot.messages_removed} messages summarized)"
         )
 
     def _format_conversation(self, messages: list[Message]) -> str:
