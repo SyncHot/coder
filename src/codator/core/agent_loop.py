@@ -652,7 +652,7 @@ class PlanActVerifyAgent:
         if force_json:
             payload["format"] = "json"
 
-        timeout = httpx.Timeout(connect=30.0, read=180.0, write=30.0, pool=30.0)
+        timeout = httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0)
 
         if on_token is None:
             # Non-streaming (original path)
