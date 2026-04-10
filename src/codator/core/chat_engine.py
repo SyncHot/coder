@@ -120,6 +120,8 @@ class ChatEngine:
         self._model_selector: ModelSelector | None = None
         self._contextual_index: ContextualIndex | None = None
         self._confirm_callback: ConfirmCallback | None = None
+        self._message_count: int = 0
+        self._system_refresh_interval: int = 10
 
     # ----- Lifecycle -----
 
@@ -284,6 +286,11 @@ class ChatEngine:
     async def chat_stream(self, user_input: str) -> AsyncIterator[str]:
         """Send a user message and stream the response, with agentic tool calling."""
         assert self._context is not None, "Call initialize() first"
+
+        # Refresh system prompt periodically (picks up new git diff)
+        self._message_count += 1
+        if self._message_count % self._system_refresh_interval == 0:
+            self._refresh_system_prompt()
 
         # Auto-select model if model selector is available
         if self._model_selector and isinstance(self._backend, OllamaBackend):
@@ -581,6 +588,27 @@ class ChatEngine:
         if self._summary_backend:
             await self._summary_backend.close()
         await self._tools.close_all()
+
+    def clear_context(self) -> None:
+        """Fast context reset — keeps backends, tools, and indexes hot."""
+        if self._context:
+            self._context.clear()
+            sys_prompt = self._build_system_prompt()
+            self._context.add_message(
+                Message(role=Role.SYSTEM, content=sys_prompt)
+            )
+        self._message_count = 0
+
+    def _refresh_system_prompt(self) -> None:
+        """Update the system message in-place with fresh git diff."""
+        if not self._context:
+            return
+        new_prompt = self._build_system_prompt()
+        messages = self._context.get_messages()
+        for msg in messages:
+            if msg.role == Role.SYSTEM and "codator" in msg.content:
+                msg.content = new_prompt
+                break
 
     # ----- Tool execution -----
 

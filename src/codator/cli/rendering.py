@@ -114,6 +114,9 @@ def print_help():
 | `/gpu` | Show GPU/VRAM & Ollama stats |
 | `/memory` | Show contextual index stats |
 | `/mcp <action>` | MCP server management (connect/list/disconnect) |
+| `/save [name]` | Save current conversation |
+| `/load <id>` | Load a saved conversation |
+| `/history` | List saved conversations |
 """
     console.print(Markdown(help_text))
 

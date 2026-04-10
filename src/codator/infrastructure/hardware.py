@@ -5,12 +5,17 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import psutil
 
 from codator.domain.interfaces import HardwareProbe
 from codator.domain.models import HardwareInfo, InferenceMode, ModelRecommendation
+
+# TTL-based cache for hardware checks
+_hw_cache: tuple[float, HardwareInfo] | None = None
+_HW_CACHE_TTL = 30.0  # seconds
 
 
 class AMDHardwareProbe(HardwareProbe):
@@ -149,8 +154,20 @@ class AMDHardwareProbe(HardwareProbe):
 
 
 def check_hardware() -> tuple[HardwareInfo, list[ModelRecommendation]]:
-    """Convenience function — detect hardware and get model recommendations."""
+    """Convenience function — detect hardware and get model recommendations.
+
+    Results are cached for 30 seconds to avoid repeated subprocess calls.
+    """
+    global _hw_cache
+    now = time.monotonic()
+    if _hw_cache is not None:
+        cached_time, cached_hw = _hw_cache
+        if now - cached_time < _HW_CACHE_TTL:
+            probe = AMDHardwareProbe()
+            return cached_hw, probe.recommend_models(cached_hw)
+
     probe = AMDHardwareProbe()
     hw = probe.check()
+    _hw_cache = (now, hw)
     recs = probe.recommend_models(hw)
     return hw, recs

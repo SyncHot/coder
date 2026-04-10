@@ -31,6 +31,7 @@ COMMANDS = [
     "/clear", "/hardware", "/index", "/git", "/web",
     "/ssh", "/browser", "/terminal", "/ollama",
     "/agent", "/gpu", "/memory", "/mcp",
+    "/save", "/load", "/history",
 ]
 command_completer = WordCompleter(COMMANDS, sentence=True)
 

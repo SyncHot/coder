@@ -52,8 +52,8 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
             print_context_status(engine.context_status)
 
         case "/clear":
-            await engine.initialize()
-            print_info("Conversation cleared and context reset.")
+            engine.clear_context()
+            print_info("Conversation cleared.")
 
         case "/hardware" | "/hw":
             hw, recs = check_hardware()
@@ -106,6 +106,15 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
 
         case "/mcp":
             await _handle_mcp(arg, engine)
+
+        case "/save":
+            await _handle_save(arg, engine)
+
+        case "/load":
+            await _handle_load(arg, engine)
+
+        case "/history":
+            await _handle_history(engine)
 
         case _:
             print_error(f"Unknown command: {command}. Type /help for available commands.")
@@ -472,3 +481,74 @@ async def _handle_mcp(arg: str, engine: ChatEngine) -> None:
 
         case _:
             print_error(f"Unknown MCP action: {action}. Use connect/list/disconnect.")
+
+
+async def _handle_save(arg: str, engine: ChatEngine) -> None:
+    """Save current conversation: /save [name]."""
+    import uuid
+
+    from codator.core.conversation_store import ConversationStore
+
+    if not engine._context:
+        print_error("No active conversation to save.")
+        return
+
+    conv_id = arg.strip() or str(uuid.uuid4())[:8]
+    store = ConversationStore()
+    try:
+        messages = engine._context.get_messages()
+        store.save(conv_id, messages, title=arg or "", model=engine.active_model)
+        print_info(f"Saved conversation as '{conv_id}' ({len(messages)} messages).")
+    except Exception as exc:
+        print_error(f"Save failed: {exc}")
+    finally:
+        store.close()
+
+
+async def _handle_load(arg: str, engine: ChatEngine) -> None:
+    """Load a saved conversation: /load <id>."""
+    from codator.core.conversation_store import ConversationStore
+
+    if not arg.strip():
+        print_error("Usage: /load <conversation-id>. Use /history to list saved.")
+        return
+
+    store = ConversationStore()
+    try:
+        messages = store.load(arg.strip())
+        if messages is None:
+            print_error(f"Conversation '{arg}' not found.")
+            return
+        engine.clear_context()
+        for msg in messages:
+            engine._context.add_message(msg)
+        print_info(f"Loaded '{arg}' ({len(messages)} messages).")
+    except Exception as exc:
+        print_error(f"Load failed: {exc}")
+    finally:
+        store.close()
+
+
+async def _handle_history(engine: ChatEngine) -> None:
+    """List saved conversations: /history."""
+    from rich.table import Table
+
+    from codator.core.conversation_store import ConversationStore
+
+    store = ConversationStore()
+    try:
+        convs = store.list_conversations(limit=20)
+        if not convs:
+            print_info("No saved conversations.")
+            return
+        table = Table(title="Saved Conversations", border_style="cyan")
+        table.add_column("ID", style="bold")
+        table.add_column("Title")
+        table.add_column("Model")
+        for c in convs:
+            table.add_row(c["id"], c["title"][:60], c["model"])
+        console.print(table)
+    except Exception as exc:
+        print_error(f"History failed: {exc}")
+    finally:
+        store.close()
