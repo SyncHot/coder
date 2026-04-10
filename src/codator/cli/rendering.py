@@ -5,9 +5,7 @@ from __future__ import annotations
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.table import Table
-from rich.text import Text
 
 console = Console()
 
@@ -101,7 +99,7 @@ def print_help():
 | `/help` | Show this help |
 | `/quit` or `/exit` | Exit codator |
 | `/model <path>` | Load a local GGUF model |
-| `/api <claude\|openai>` | Switch to cloud API |
+| `/api <claude\\|openai>` | Switch to cloud API |
 | `/context` | Show context usage |
 | `/clear` | Clear conversation |
 | `/hardware` | Show GPU/hardware info |

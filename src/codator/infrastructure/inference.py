@@ -11,7 +11,7 @@ from typing import Any
 
 from codator.config import AppSettings, get_settings
 from codator.domain.interfaces import InferenceBackend
-from codator.domain.models import GenerationResult, Message, Role
+from codator.domain.models import GenerationResult, Message
 from codator.infrastructure.tokenizer import count_tokens_llama, count_tokens_tiktoken
 
 logger = logging.getLogger(__name__)
@@ -34,8 +34,7 @@ class LlamaCppBackend(InferenceBackend):
                 f"Model file not found: {self._model_path!r}. "
                 "Set inference.model_path in config or pass --model to CLI."
             )
-        # Load in executor to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._model = await loop.run_in_executor(None, self._load_model)
         self._loaded = True
 
@@ -65,7 +64,7 @@ class LlamaCppBackend(InferenceBackend):
     ) -> GenerationResult:
         await self._ensure_loaded()
         prompt = self._build_prompt(messages)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         t0 = time.perf_counter()
 
         response = await loop.run_in_executor(
@@ -98,9 +97,8 @@ class LlamaCppBackend(InferenceBackend):
     ) -> AsyncIterator[str]:
         await self._ensure_loaded()
         prompt = self._build_prompt(messages)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
-        # Create streaming completion in executor, then iterate
         stream = await loop.run_in_executor(
             None,
             lambda: self._model.create_chat_completion(
@@ -111,11 +109,26 @@ class LlamaCppBackend(InferenceBackend):
             ),
         )
 
-        for chunk in stream:
-            delta = chunk["choices"][0].get("delta", {})
-            token = delta.get("content")
-            if token:
-                yield token
+        # Wrap synchronous iteration in executor to avoid blocking the event loop
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        def _drain():
+            for chunk in stream:
+                delta = chunk["choices"][0].get("delta", {})
+                token = delta.get("content")
+                if token:
+                    queue.put_nowait(token)
+            queue.put_nowait(None)
+
+        drain_task = loop.run_in_executor(None, _drain)
+
+        while True:
+            token = await queue.get()
+            if token is None:
+                break
+            yield token
+
+        await drain_task
 
     def count_tokens(self, text: str) -> int:
         if self._model is not None:

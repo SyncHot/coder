@@ -81,7 +81,7 @@ class GitContext:
                 log_lines = [
                     f"  {c.hexsha[:8]} {c.summary}" for c in commits
                 ]
-                parts.append(f"\nRecent commits:\n" + "\n".join(log_lines))
+                parts.append("\nRecent commits:\n" + "\n".join(log_lines))
         except Exception:
             pass
 

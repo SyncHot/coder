@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 
 from codator.config import AppSettings, get_settings
 from codator.domain.interfaces import InferenceBackend
-from codator.domain.models import GenerationResult, Message
+from codator.domain.models import GenerationResult, Message, Role
 from codator.infrastructure.tokenizer import count_tokens_tiktoken
 
 logger = logging.getLogger(__name__)
@@ -30,13 +30,24 @@ class ClaudeBackend(InferenceBackend):
                 api_key=self._settings.api.claude_api_key
             )
 
+    @staticmethod
+    def _split_messages(messages: list[Message]) -> tuple[str, list[dict[str, str]]]:
+        """Separate system/summary messages from chat messages for Claude API."""
+        system_parts: list[str] = []
+        chat_msgs: list[dict[str, str]] = []
+        for m in messages:
+            if m.role in (Role.SYSTEM, Role.SUMMARY):
+                system_parts.append(m.content)
+            else:
+                chat_msgs.append(m.to_llm_dict())
+        system_text = "\n\n".join(system_parts) if system_parts else ""
+        return system_text, chat_msgs
+
     async def generate(
         self, messages: list[Message], *, max_tokens=2048, temperature=0.3, stream=False,
     ) -> GenerationResult:
         self._ensure_client()
-        system_msgs = [m for m in messages if m.role.value == "system"]
-        chat_msgs = [m.to_llm_dict() for m in messages if m.role.value != "system"]
-        system_text = "\n\n".join(m.content for m in system_msgs) if system_msgs else ""
+        system_text, chat_msgs = self._split_messages(messages)
 
         t0 = time.perf_counter()
         response = await self._client.messages.create(
@@ -62,9 +73,7 @@ class ClaudeBackend(InferenceBackend):
         self, messages: list[Message], *, max_tokens=2048, temperature=0.3,
     ) -> AsyncIterator[str]:
         self._ensure_client()
-        system_msgs = [m for m in messages if m.role.value == "system"]
-        chat_msgs = [m.to_llm_dict() for m in messages if m.role.value != "system"]
-        system_text = "\n\n".join(m.content for m in system_msgs) if system_msgs else ""
+        system_text, chat_msgs = self._split_messages(messages)
 
         async with self._client.messages.stream(
             model=self._settings.api.claude_model,
@@ -101,14 +110,26 @@ class OpenAIBackend(InferenceBackend):
                 api_key=self._settings.api.openai_api_key
             )
 
+    @staticmethod
+    def _prepare_messages(messages: list[Message]) -> list[dict[str, str]]:
+        """Convert messages for OpenAI API, merging SUMMARY into system role."""
+        result: list[dict[str, str]] = []
+        for m in messages:
+            d = m.to_llm_dict()
+            if m.role == Role.SUMMARY:
+                d["role"] = "system"
+            result.append(d)
+        return result
+
     async def generate(
         self, messages: list[Message], *, max_tokens=2048, temperature=0.3, stream=False,
     ) -> GenerationResult:
         self._ensure_client()
+        prepared = self._prepare_messages(messages)
         t0 = time.perf_counter()
         response = await self._client.chat.completions.create(
             model=self._settings.api.openai_model,
-            messages=[m.to_llm_dict() for m in messages],
+            messages=prepared,
             max_tokens=max_tokens,
             temperature=temperature,
         )
@@ -128,9 +149,10 @@ class OpenAIBackend(InferenceBackend):
         self, messages: list[Message], *, max_tokens=2048, temperature=0.3,
     ) -> AsyncIterator[str]:
         self._ensure_client()
+        prepared = self._prepare_messages(messages)
         stream = await self._client.chat.completions.create(
             model=self._settings.api.openai_model,
-            messages=[m.to_llm_dict() for m in messages],
+            messages=prepared,
             max_tokens=max_tokens,
             temperature=temperature,
             stream=True,

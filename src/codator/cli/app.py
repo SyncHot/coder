@@ -5,22 +5,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import sys
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import InMemoryHistory
 
+from codator.cli.commands import handle_command
 from codator.cli.rendering import (
     console,
-    print_assistant,
     print_compaction_notice,
     print_error,
     print_info,
     print_streaming_token,
     print_welcome,
 )
-from codator.cli.commands import handle_command
 from codator.config import load_config
 from codator.core.chat_engine import ChatEngine
 from codator.infrastructure.hardware import check_hardware
@@ -41,7 +39,10 @@ def parse_args() -> argparse.Namespace:
         description="Dev-Assistant-OS — local AI coding assistant",
     )
     parser.add_argument("--model", "-m", help="Path to GGUF model file")
-    parser.add_argument("--api", choices=["claude", "openai"], help="Use cloud API instead of local model")
+    parser.add_argument(
+        "--api", choices=["claude", "openai"],
+        help="Use cloud API instead of local model",
+    )
     parser.add_argument("--project", "-p", default=".", help="Project root directory")
     parser.add_argument("--web", action="store_true", help="Also start web dashboard")
     parser.add_argument("--config", "-c", help="Path to config TOML file")
@@ -82,8 +83,9 @@ async def async_main():
 
     # Web dashboard (background)
     if args.web:
-        from codator.web.app import create_app
         import uvicorn
+
+        from codator.web.app import create_app
         app = create_app(engine)
         uv_config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
         server = uvicorn.Server(uv_config)
@@ -100,7 +102,7 @@ async def async_main():
         while True:
             try:
                 # prompt_toolkit is sync; run in executor
-                user_input = await asyncio.get_event_loop().run_in_executor(
+                user_input = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: session.prompt("you> "),
                 )

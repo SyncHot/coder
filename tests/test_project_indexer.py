@@ -1,6 +1,5 @@
 """Tests for project indexer."""
 
-import os
 import tempfile
 from pathlib import Path
 

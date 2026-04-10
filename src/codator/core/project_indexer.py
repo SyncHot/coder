@@ -81,7 +81,9 @@ class TreeSitterProjectIndexer(ProjectIndexer):
             import tree_sitter_languages  # noqa: F401
             self._ts_available = True
         except ImportError:
-            logger.warning("tree-sitter-languages not available; indexing will use filename-only mode")
+            logger.warning(
+                "tree-sitter-languages not available; indexing will use filename-only mode"
+            )
 
     def _get_parser(self, language: str):
         if not self._ts_available:
@@ -100,7 +102,7 @@ class TreeSitterProjectIndexer(ProjectIndexer):
         project_map = ProjectMap(root=str(root_path))
 
         # Collect files asynchronously
-        files_to_index = await asyncio.get_event_loop().run_in_executor(
+        files_to_index = await asyncio.get_running_loop().run_in_executor(
             None, lambda: self._collect_files(root_path, settings)
         )
 
@@ -150,7 +152,7 @@ class TreeSitterProjectIndexer(ProjectIndexer):
 
     async def _index_file(self, file_path: Path, root: Path) -> FileInfo:
         """Parse a single file and extract symbols."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         rel_path = str(file_path.relative_to(root))
         language = EXTENSION_TO_LANG.get(file_path.suffix, "")
         stat = file_path.stat()

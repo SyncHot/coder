@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from codator.config import AppSettings, get_settings
 from codator.core.context_manager import AdaptiveContextManager
 from codator.core.git_integration import GitContext
 from codator.core.project_indexer import TreeSitterProjectIndexer
-from codator.domain.interfaces import InferenceBackend
 from codator.domain.models import GenerationResult, Message, ProjectMap, Role
-from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
 from codator.infrastructure.api_clients import ClaudeBackend, OpenAIBackend
-
-if TYPE_CHECKING:
-    pass
+from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +112,7 @@ class ChatEngine:
         self._context.add_message(user_msg)
 
         # Check compaction before generating
-        compacted = await self._context.maybe_compact()
+        await self._context.maybe_compact()
 
         result = await self._backend.generate(
             self._context.get_messages(),
@@ -198,7 +193,10 @@ class ChatEngine:
     async def refresh_project_context(self) -> str:
         """Re-index project and update git context."""
         self._project_map = await self._indexer.index(self._project_root)
-        msg = f"Re-indexed: {self._project_map.total_files} files, {self._project_map.total_symbols} symbols"
+        msg = (
+            f"Re-indexed: {self._project_map.total_files} files, "
+            f"{self._project_map.total_symbols} symbols"
+        )
         logger.info(msg)
         return msg
 

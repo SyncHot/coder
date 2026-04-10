@@ -11,7 +11,6 @@ Policy:
 from __future__ import annotations
 
 import logging
-import time
 from typing import TYPE_CHECKING
 
 from codator.domain.interfaces import ContextManager, InferenceBackend
@@ -58,8 +57,8 @@ class AdaptiveContextManager(ContextManager):
         summary_backend: InferenceBackend | None = None,
         token_counter: callable | None = None,
     ):
-        from codator.config import ContextConfig as CC
-        self._config = config or CC()
+        from codator.config import ContextConfig
+        self._config = config or ContextConfig()
         self._context_window = context_window
         self._primary = primary_backend
         self._summary = summary_backend  # small 3B model for compaction

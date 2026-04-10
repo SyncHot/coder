@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
@@ -12,7 +12,7 @@ from typing import Any
 # Chat messages
 # ---------------------------------------------------------------------------
 
-class Role(str, Enum):
+class Role(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
@@ -38,7 +38,7 @@ class Message:
 # Hardware / GPU info
 # ---------------------------------------------------------------------------
 
-class InferenceMode(str, Enum):
+class InferenceMode(StrEnum):
     FULL_GPU = "full_gpu"
     HYBRID = "hybrid"
     CPU_ONLY = "cpu_only"
@@ -83,7 +83,7 @@ class ModelRecommendation:
 # Project indexing
 # ---------------------------------------------------------------------------
 
-class SymbolKind(str, Enum):
+class SymbolKind(StrEnum):
     FUNCTION = "function"
     CLASS = "class"
     METHOD = "method"
@@ -121,7 +121,11 @@ class ProjectMap:
 
     def summary(self, max_files: int = 50) -> str:
         """Compact text representation for injecting into LLM context."""
-        lines = [f"Project: {self.root}", f"Files: {self.total_files}, Symbols: {self.total_symbols}", ""]
+        lines = [
+            f"Project: {self.root}",
+            f"Files: {self.total_files}, Symbols: {self.total_symbols}",
+            "",
+        ]
         for i, (path, finfo) in enumerate(sorted(self.files.items())):
             if i >= max_files:
                 lines.append(f"  ... and {self.total_files - max_files} more files")

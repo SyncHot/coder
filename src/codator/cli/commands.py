@@ -71,8 +71,10 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
         case "/web":
             print_info("Starting web dashboard on http://localhost:8000 ...")
             import asyncio
-            from codator.web.app import create_app
+
             import uvicorn
+
+            from codator.web.app import create_app
             app = create_app(engine)
             config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
             server = uvicorn.Server(config)
