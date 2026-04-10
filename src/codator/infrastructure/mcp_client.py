@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from codator.domain.interfaces import Tool
 from codator.domain.models import ToolResult
+
+if TYPE_CHECKING:
+    from codator.core.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +127,7 @@ class MCPClient:
         try:
             self._process.terminate()
             await asyncio.wait_for(self._process.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("MCP server did not exit in time, killing")
             self._process.kill()
             await self._process.wait()
@@ -164,13 +167,11 @@ class MCPClient:
 
         return text
 
-    async def discover_and_register(self, registry: "ToolRegistry") -> int:
+    async def discover_and_register(self, registry: ToolRegistry) -> int:
         """Discover tools from the server and register them in *registry*.
 
         Returns the number of tools registered.
         """
-        from codator.core.tool_registry import ToolRegistry as _TR  # noqa: F811
-
         tools = await self.list_tools()
         count = 0
         for tool_def in tools:
@@ -303,7 +304,7 @@ class MCPManager:
         for name in names:
             await self.disconnect_server(name)
 
-    async def register_all(self, registry: "ToolRegistry") -> int:
+    async def register_all(self, registry: ToolRegistry) -> int:
         """Register tools from every connected server into *registry*.
 
         Returns the total number of tools registered.

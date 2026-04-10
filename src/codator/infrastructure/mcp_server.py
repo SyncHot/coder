@@ -161,7 +161,8 @@ class MCPServer:
             # Skip hidden directories and common non-essential dirs
             rel_dir = os.path.relpath(dirpath, self._project_root)
             parts = rel_dir.split(os.sep)
-            if any(p.startswith(".") or p in ("node_modules", "__pycache__", ".git") for p in parts):
+            skip = ("node_modules", "__pycache__", ".git")
+            if any(p.startswith(".") or p in skip for p in parts):
                 if rel_dir != ".":
                     continue
 
