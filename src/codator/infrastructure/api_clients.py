@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 from codator.config import AppSettings, get_settings
 from codator.domain.interfaces import InferenceBackend
-from codator.domain.models import GenerationResult, Message, Role
+from codator.domain.models import GenerationResult, Message, Role, ToolCall
 from codator.infrastructure.tokenizer import count_tokens_tiktoken
 
 logger = logging.getLogger(__name__)
@@ -43,23 +45,52 @@ class ClaudeBackend(InferenceBackend):
         system_text = "\n\n".join(system_parts) if system_parts else ""
         return system_text, chat_msgs
 
+    @staticmethod
+    def _convert_tools_to_anthropic(tools: list[dict]) -> list[dict]:
+        """Convert OpenAI-format tool definitions to Anthropic's format."""
+        anthropic_tools: list[dict] = []
+        for tool in tools:
+            func = tool.get("function", {})
+            anthropic_tools.append({
+                "name": func.get("name", ""),
+                "description": func.get("description", ""),
+                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+            })
+        return anthropic_tools
+
     async def generate(
-        self, messages: list[Message], *, max_tokens=2048, temperature=0.3, stream=False,
+        self, messages: list[Message], *, max_tokens=2048, temperature=0.3,
+        stream=False, tools: list[dict] | None = None,
     ) -> GenerationResult:
         self._ensure_client()
         system_text, chat_msgs = self._split_messages(messages)
 
+        kwargs: dict[str, Any] = {
+            "model": self._settings.api.claude_model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system_text or "You are a senior software engineer.",
+            "messages": chat_msgs,
+        }
+        if tools:
+            kwargs["tools"] = self._convert_tools_to_anthropic(tools)
+
         t0 = time.perf_counter()
-        response = await self._client.messages.create(
-            model=self._settings.api.claude_model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system_text or "You are a senior software engineer.",
-            messages=chat_msgs,
-        )
+        response = await self._client.messages.create(**kwargs)
         elapsed = time.perf_counter() - t0
 
-        text = response.content[0].text if response.content else ""
+        text = ""
+        tool_calls: list[ToolCall] = []
+        for block in response.content:
+            if block.type == "text":
+                text = block.text
+            elif block.type == "tool_use":
+                tool_calls.append(ToolCall(
+                    tool_name=block.name,
+                    parameters=block.input if isinstance(block.input, dict) else {},
+                    call_id=block.id or "",
+                ))
+
         return GenerationResult(
             text=text,
             tokens_generated=response.usage.output_tokens,
@@ -67,6 +98,7 @@ class ClaudeBackend(InferenceBackend):
             time_seconds=elapsed,
             model_name=self._settings.api.claude_model,
             stopped_by=response.stop_reason or "end_turn",
+            tool_calls=tool_calls,
         )
 
     async def generate_stream(
@@ -122,20 +154,44 @@ class OpenAIBackend(InferenceBackend):
         return result
 
     async def generate(
-        self, messages: list[Message], *, max_tokens=2048, temperature=0.3, stream=False,
+        self, messages: list[Message], *, max_tokens=2048, temperature=0.3,
+        stream=False, tools: list[dict] | None = None,
     ) -> GenerationResult:
         self._ensure_client()
         prepared = self._prepare_messages(messages)
+
+        kwargs: dict[str, Any] = {
+            "model": self._settings.api.openai_model,
+            "messages": prepared,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
+
         t0 = time.perf_counter()
-        response = await self._client.chat.completions.create(
-            model=self._settings.api.openai_model,
-            messages=prepared,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        response = await self._client.chat.completions.create(**kwargs)
         elapsed = time.perf_counter() - t0
 
         choice = response.choices[0]
+
+        tool_calls: list[ToolCall] = []
+        if choice.message.tool_calls:
+            for tc in choice.message.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Malformed tool call arguments for '%s': %s",
+                        tc.function.name, tc.function.arguments,
+                    )
+                    args = {}
+                tool_calls.append(ToolCall(
+                    tool_name=tc.function.name,
+                    parameters=args,
+                    call_id=tc.id or "",
+                ))
+
         return GenerationResult(
             text=choice.message.content or "",
             tokens_generated=response.usage.completion_tokens if response.usage else 0,
@@ -143,6 +199,7 @@ class OpenAIBackend(InferenceBackend):
             time_seconds=elapsed,
             model_name=self._settings.api.openai_model,
             stopped_by=choice.finish_reason or "stop",
+            tool_calls=tool_calls,
         )
 
     async def generate_stream(

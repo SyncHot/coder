@@ -351,6 +351,8 @@ class ChatEngine:
                 self._active_model = choice.model_name
                 if self._context:
                     self._context._context_window = num_ctx
+                    # Compact context if it exceeds new (smaller) window
+                    await self._context.maybe_compact()
                 logger.info(
                     "Auto-switched to %s (num_ctx=%d)",
                     choice.model_name, num_ctx,
@@ -447,6 +449,9 @@ class ChatEngine:
 
             # --- Sanitize tool params: some models pass schema dicts instead of values ---
             for tc in tool_calls:
+                if not isinstance(tc.parameters, dict):
+                    logger.warning("Tool %s has non-dict parameters: %r, replacing with empty dict", tc.tool_name, type(tc.parameters))
+                    tc.parameters = {}
                 sanitized = {}
                 for k, v in tc.parameters.items():
                     if isinstance(v, dict) and "type" in v and "description" in v:
@@ -558,7 +563,9 @@ class ChatEngine:
                 self._context.add_message(tool_msg)
 
         # Safety: if we hit max iterations
-        yield "\n⚠️ Reached maximum tool iterations.\n"
+        warning_text = "⚠️ Reached maximum tool iterations. Please try a more specific question."
+        yield f"\n{warning_text}\n"
+        self._context.add_message(Message(role=Role.ASSISTANT, content=warning_text))
 
     async def _force_text_answer(self) -> AsyncIterator[str]:
         """Force the model to produce a text-only answer (no tools)."""
@@ -602,6 +609,7 @@ class ChatEngine:
         calls: list[ToolCall] = []
         decoder = json.JSONDecoder()
         i = 0
+        call_index = 0
         while i < len(text):
             # Find next '{'
             idx = text.find("{", i)
@@ -617,8 +625,9 @@ class ChatEngine:
                     calls.append(ToolCall(
                         tool_name=obj["name"],
                         parameters=obj.get("arguments", {}),
-                        call_id=f"text_{obj['name']}",
+                        call_id=f"text_{obj['name']}_{call_index}",
                     ))
+                    call_index += 1
                 i = idx + end
             except (json.JSONDecodeError, ValueError):
                 i = idx + 1

@@ -44,13 +44,13 @@ class StreamingMarkdownRenderer:
 
         if self._in_code_block:
             # Check for closing fence
-            if "\n```" in text or text.rstrip().endswith("```"):
+            if "\n```" in text or text.strip() == "```":
                 # Find where the closing ``` is
                 lines = text.split("\n")
                 code_lines: list[str] = []
                 closed = False
                 for line in lines:
-                    if line.strip() == "```" and code_lines:
+                    if line.strip() == "```":
                         closed = True
                         break
                     code_lines.append(line)

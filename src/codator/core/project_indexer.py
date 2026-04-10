@@ -142,7 +142,7 @@ class TreeSitterProjectIndexer(ProjectIndexer):
         extensions = set(settings.project.index_extensions)
         max_size = settings.project.max_file_size
 
-        for dirpath, dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             # Prune excluded directories in-place
             dirnames[:] = [d for d in dirnames if d not in exclude and not d.startswith(".")]
 

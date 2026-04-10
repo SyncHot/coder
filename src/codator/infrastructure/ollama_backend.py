@@ -93,6 +93,10 @@ class OllamaBackend(InferenceBackend):
                 try:
                     args = json.loads(tc.function.arguments)
                 except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Malformed tool call arguments for '%s': %s",
+                        tc.function.name, tc.function.arguments,
+                    )
                     args = {}
                 tool_calls.append(ToolCall(
                     tool_name=tc.function.name,

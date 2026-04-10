@@ -172,7 +172,7 @@ async def _handle_model_picker(engine: ChatEngine) -> None:
 
     import asyncio
     try:
-        choice = await asyncio.get_event_loop().run_in_executor(
+        choice = await asyncio.get_running_loop().run_in_executor(
             None, lambda: input("model #> ").strip(),
         )
     except (EOFError, KeyboardInterrupt):

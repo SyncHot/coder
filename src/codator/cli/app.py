@@ -87,7 +87,7 @@ async def async_main():
     async def _cli_confirm(tool_name: str, summary: str) -> bool:
         console.print(f"\n⚠️  [bold yellow]{tool_name}[/]: {summary}")
         try:
-            answer = await asyncio.get_event_loop().run_in_executor(
+            answer = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: input("Allow? [y/N] ").strip().lower(),
             )
             return answer in ("y", "yes")

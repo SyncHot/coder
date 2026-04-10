@@ -216,6 +216,7 @@ class AdaptiveContextManager(ContextManager):
             # Truncate very long messages in the summary input
             content = m.content
             if len(content) > 3000:
+                logger.info("Truncating message from %d to 2800 chars for summary", len(content))
                 content = content[:2800] + "\n... [truncated for summary]"
             parts.append(f"[{label}]: {content}")
         return "\n\n".join(parts)

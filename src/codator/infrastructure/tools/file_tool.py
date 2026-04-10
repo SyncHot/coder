@@ -61,6 +61,11 @@ class ReadFileTool(Tool):
             )
 
         try:
+            # Check for binary content before reading as text
+            with open(full, "rb") as bf:
+                chunk = bf.read(8192)
+                if b"\x00" in chunk:
+                    return ToolResult(success=False, error=f"File appears to be binary: {path}")
             with open(full, encoding="utf-8", errors="replace") as f:
                 content = f.read()
             return ToolResult(success=True, output=content)

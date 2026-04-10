@@ -70,35 +70,41 @@ class ConversationStore:
             else:
                 title = f"conversation-{conversation_id[:8]}"
 
-        self._conn.execute(
-            """INSERT OR REPLACE INTO conversations
-               (id, title, model, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (conversation_id, title, model, now, now),
-        )
-        # Clear old messages for this conversation
-        self._conn.execute(
-            "DELETE FROM messages WHERE conversation_id = ?",
-            (conversation_id,),
-        )
-        # Insert all messages
-        for msg in messages:
-            meta = json.dumps(msg.metadata) if msg.metadata else "{}"
-            self._conn.execute(
-                """INSERT INTO messages
-                   (conversation_id, role, content, token_count, timestamp,
-                    metadata_json)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    conversation_id,
-                    msg.role.value,
-                    msg.content,
-                    msg.token_count,
-                    msg.timestamp,
-                    meta,
-                ),
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute("BEGIN")
+            cursor.execute(
+                """INSERT OR REPLACE INTO conversations
+                   (id, title, model, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (conversation_id, title, model, now, now),
             )
-        self._conn.commit()
+            # Clear old messages for this conversation
+            cursor.execute(
+                "DELETE FROM messages WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            # Insert all messages
+            for msg in messages:
+                meta = json.dumps(msg.metadata) if msg.metadata else "{}"
+                cursor.execute(
+                    """INSERT INTO messages
+                       (conversation_id, role, content, token_count, timestamp,
+                        metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        conversation_id,
+                        msg.role.value,
+                        msg.content,
+                        msg.token_count,
+                        msg.timestamp,
+                        meta,
+                    ),
+                )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # Load

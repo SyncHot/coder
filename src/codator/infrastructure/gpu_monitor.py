@@ -98,10 +98,18 @@ class GPUMonitor:
                 continue
             if "Total Memory" in line:
                 val = line.rsplit(":", 1)[-1].strip()
-                total_bytes = int(val)
+                try:
+                    total_bytes = int(val)
+                except (ValueError, TypeError):
+                    logger.debug("Non-numeric VRAM value: %r", val)
+                    continue
             elif "Total Used" in line:
                 val = line.rsplit(":", 1)[-1].strip()
-                used_bytes = int(val)
+                try:
+                    used_bytes = int(val)
+                except (ValueError, TypeError):
+                    logger.debug("Non-numeric VRAM value: %r", val)
+                    continue
 
         if total_bytes < _MIN_VRAM_BYTES:
             return 0, 0, 0

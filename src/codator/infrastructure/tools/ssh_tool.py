@@ -76,9 +76,16 @@ class SSHTool(Tool):
             }
             if kp:
                 kwargs["key_filename"] = kp
-            elif pw:
-                kwargs["password"] = pw
-            client.connect(**kwargs)
+            try:
+                client.connect(**kwargs, password=pw if pw and not kp else None)
+            except Exception as exc:
+                # Sanitize to avoid leaking credentials in tracebacks
+                sanitized = str(exc)
+                if pw and pw in sanitized:
+                    sanitized = sanitized.replace(pw, "****")
+                raise ConnectionError(
+                    f"SSH connection to {u}@{h}:{p} failed: {sanitized}"
+                ) from None
             return client
 
         try:

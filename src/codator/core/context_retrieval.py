@@ -384,7 +384,10 @@ class ContextualIndex:
         chunks: list[CodeChunk] = []
 
         # Module header: everything before the first symbol
-        first_sym_line = min(s.line for s in symbols)
+        if symbols:
+            first_sym_line = min(s.line for s in symbols)
+        else:
+            first_sym_line = 0  # fallback to start of file
         if first_sym_line > 1:
             header_content = "\n".join(lines[: first_sym_line - 1]).rstrip()
             if header_content.strip():

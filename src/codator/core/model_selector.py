@@ -313,7 +313,13 @@ class ModelSelector:
 
         # Nothing fits — return the smallest known model anyway and let
         # Ollama deal with the consequences.
-        smallest = self.FAST_MODELS[0] if self.FAST_MODELS else next(iter(self._available))
+        if self.FAST_MODELS:
+            smallest = self.FAST_MODELS[0]
+        elif self._available:
+            smallest = next(iter(self._available))
+        else:
+            smallest = "qwen2.5-coder:1.5b"  # hardcoded fallback
+            logger.error("No models available at all — using default %s", smallest)
         logger.error(
             "No model fits in %d MiB VRAM — selecting %s anyway", self._vram_total, smallest,
         )

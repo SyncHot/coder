@@ -64,15 +64,19 @@ class GitContext:
 
         # Diff (staged + unstaged combined)
         try:
-            diff_text = self._repo.git.diff("--stat", "--patch", "--no-color")
-            diff_lines = diff_text.split("\n")
-            if len(diff_lines) > max_diff_lines:
-                diff_text = "\n".join(diff_lines[:max_diff_lines])
-                diff_text += f"\n... [truncated, {len(diff_lines) - max_diff_lines} lines omitted]"
+            diff_text = self._repo.git.diff("--stat", "--no-color")
+            # Only get full patch if stat is reasonable
+            stat_lines = diff_text.count("\n")
+            if stat_lines < max_diff_lines:
+                diff_text = self._repo.git.diff("--patch", "--no-color")
+                diff_lines = diff_text.split("\n")
+                if len(diff_lines) > max_diff_lines:
+                    diff_text = "\n".join(diff_lines[:max_diff_lines]) + "\n... [truncated]"
             if diff_text.strip():
                 parts.append(f"\n--- Git Diff ---\n{diff_text}")
-        except git.GitCommandError:
-            pass
+        except Exception as exc:
+            diff_text = f"(diff unavailable: {exc})"
+            parts.append(f"\n--- Git Diff ---\n{diff_text}")
 
         # Recent commits
         try:

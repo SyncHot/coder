@@ -238,7 +238,7 @@ class PlanActVerifyAgent:
         if force_json:
             payload["format"] = "json"
 
-        timeout = httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0)
+        timeout = httpx.Timeout(connect=30.0, read=180.0, write=30.0, pool=30.0)
 
         if on_token is None:
             # Non-streaming (original path)
@@ -263,6 +263,7 @@ class PlanActVerifyAgent:
                     try:
                         obj = json.loads(line)
                     except json.JSONDecodeError:
+                        logger.debug("Skipping malformed JSON line in stream: %s", line[:200])
                         continue
                     token = obj.get("message", {}).get("content", "")
                     if token:
@@ -273,9 +274,24 @@ class PlanActVerifyAgent:
         return "".join(chunks)
 
     @staticmethod
+    def _strip_json_fences(raw: str) -> str:
+        """Strip markdown code fences from JSON responses."""
+        text = raw.strip()
+        if text.startswith("```"):
+            # Remove opening fence (```json or ```)
+            first_newline = text.find("\n")
+            if first_newline != -1:
+                text = text[first_newline + 1:]
+            # Remove closing fence
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()
+                text = text[:-3].rstrip()
+        return text
+
+    @staticmethod
     def _parse_plan(raw: str, task: str) -> AgentPlan:
         """Parse JSON response into an AgentPlan, validating actions."""
-        obj = json.loads(raw)
+        obj = json.loads(PlanActVerifyAgent._strip_json_fences(raw))
         steps: list[AgentStep] = []
         for i, s in enumerate(obj.get("steps", [])):
             action = (
@@ -363,7 +379,7 @@ class PlanActVerifyAgent:
         else:
             raw = step.description
             try:
-                edit_info = json.loads(raw)
+                edit_info = json.loads(self._strip_json_fences(raw))
             except json.JSONDecodeError:
                 # LLMs often emit raw control chars in JSON strings;
                 # escape them and retry
@@ -371,12 +387,14 @@ class PlanActVerifyAgent:
                 sanitised = re.sub(
                     r'[\x00-\x1f]',
                     lambda m: f'\\u{ord(m.group()):04x}',
-                    raw,
+                    self._strip_json_fences(raw),
                 )
                 edit_info = json.loads(sanitised)
         file_rel = edit_info.get("file", step.target)
-        old_text: str = edit_info["old"]
-        new_text: str = edit_info["new"]
+        old_text = edit_info.get("old") or edit_info.get("old_text") or edit_info.get("original") or ""
+        new_text = edit_info.get("new") or edit_info.get("new_text") or edit_info.get("replacement") or ""
+        if not old_text:
+            raise ValueError("Missing 'old' field in edit_file description JSON")
 
         path = self._safe_path(file_rel)
         if not path.exists():
@@ -675,7 +693,7 @@ class PlanActVerifyAgent:
 
         Tolerant of LLM field naming variations at every level.
         """
-        obj = json.loads(raw)
+        obj = json.loads(PlanActVerifyAgent._strip_json_fences(raw))
         # Find the list of proposals — try multiple possible keys
         items: list[dict] = []
         for key in ("proposals", "highlights", "improvements", "suggestions",
@@ -685,6 +703,8 @@ class PlanActVerifyAgent:
                 break
         if not items and isinstance(obj, list):
             items = obj
+        if not items:
+            logger.warning("Proposals list is empty or null after parsing")
 
         proposals: list[Proposal] = []
         for i, p in enumerate(items):
@@ -980,13 +1000,14 @@ class PlanActVerifyAgent:
                     ))
                 except Exception as exc:
                     logger.warning("Summary generation failed: %s", exc)
+                    verification = VerifyResult(success=False)
 
                 return AgentResult(
                     plan=current_plan,
                     actions=all_actions,
                     verification=verification,
                     heal_iterations=0,
-                    final_success=True,
+                    final_success=verification.success,
                 )
 
             await _notify("Verifying…", "running")
