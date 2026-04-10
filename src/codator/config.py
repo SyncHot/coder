@@ -119,11 +119,15 @@ class AppSettings(BaseSettings):
 # Loader
 # ---------------------------------------------------------------------------
 
-_CONFIG_SEARCH_PATHS = [
-    Path("codator.toml"),
-    Path("config/default.toml"),
-    Path.home() / ".config" / "codator" / "config.toml",
-]
+def _config_search_paths() -> list[Path]:
+    """Return config file search paths (CWD, package dir, home)."""
+    pkg_root = Path(__file__).resolve().parent.parent.parent  # src/../..
+    return [
+        Path("codator.toml"),
+        Path("config/default.toml"),
+        pkg_root / "config" / "default.toml",
+        Path.home() / ".config" / "codator" / "config.toml",
+    ]
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -144,7 +148,7 @@ def load_config(path: Path | None = None) -> AppSettings:
     if path and path.exists():
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     else:
-        for candidate in _CONFIG_SEARCH_PATHS:
+        for candidate in _config_search_paths():
             if candidate.exists():
                 raw = tomllib.loads(candidate.read_text(encoding="utf-8"))
                 break
