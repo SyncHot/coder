@@ -8,6 +8,8 @@ code fragments alongside each query.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import math
 import os
@@ -734,6 +736,61 @@ class ContextualIndex:
 
     # -- Embedding-based retrieval -------------------------------------------
 
+    def _embedding_cache_path(self) -> Path:
+        """Return path for the embedding cache file."""
+        cache_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        cache_dir = cache_dir / "codator"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # Hash project root to create a unique cache per project
+        root_hash = hashlib.sha256(str(self._root).encode()).hexdigest()[:12]
+        return cache_dir / f"embeddings_{root_hash}.json"
+
+    def _chunks_fingerprint(self) -> str:
+        """Content hash of all chunks — if this changes, embeddings must rebuild."""
+        h = hashlib.sha256()
+        for c in self._chunks:
+            h.update(f"{c.file_path}:{c.start_line}:{c.end_line}:{len(c.content)}".encode())
+            h.update(c.content[:256].encode(errors="replace"))
+        return h.hexdigest()[:20]
+
+    def _load_cached_embeddings(self, model: str) -> bool:
+        """Try to load embeddings from disk cache. Returns True on hit."""
+        cache_path = self._embedding_cache_path()
+        if not cache_path.exists():
+            return False
+        try:
+            data = json.loads(cache_path.read_text())
+            if (
+                data.get("model") == model
+                and data.get("fingerprint") == self._chunks_fingerprint()
+                and len(data.get("embeddings", [])) == len(self._chunks)
+            ):
+                self._embeddings = data["embeddings"]
+                self._embedding_model = model
+                valid = sum(1 for e in self._embeddings if e)
+                logger.info(
+                    "Loaded cached embeddings: %d/%d chunks (model=%s)",
+                    valid, len(self._chunks), model,
+                )
+                return True
+        except Exception as exc:
+            logger.debug("Embedding cache load failed: %s", exc)
+        return False
+
+    def _save_embeddings_cache(self, model: str) -> None:
+        """Persist embeddings to disk cache."""
+        try:
+            cache_path = self._embedding_cache_path()
+            data = {
+                "model": model,
+                "fingerprint": self._chunks_fingerprint(),
+                "embeddings": self._embeddings,
+            }
+            cache_path.write_text(json.dumps(data))
+            logger.info("Saved embedding cache: %s", cache_path)
+        except Exception as exc:
+            logger.debug("Embedding cache save failed: %s", exc)
+
     async def build_embeddings(
         self,
         model: str = "nomic-embed-text",
@@ -742,10 +799,15 @@ class ContextualIndex:
     ) -> int:
         """Generate embeddings for all chunks via Ollama.
 
-        Returns the number of chunks embedded.
+        Uses a disk cache keyed on project root + chunk fingerprint.
+        Returns the number of chunks with valid embeddings.
         """
         if not self._chunks:
             return 0
+
+        # Try loading from cache first
+        if self._load_cached_embeddings(model):
+            return sum(1 for e in self._embeddings if e)
 
         self._embedding_model = model
         self._embeddings = []
@@ -770,6 +832,9 @@ class ContextualIndex:
             "Built embeddings for %d/%d chunks (model=%s)",
             valid, total, model,
         )
+
+        # Persist to cache for fast restarts
+        self._save_embeddings_cache(model)
         return valid
 
     @property
