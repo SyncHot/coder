@@ -71,7 +71,7 @@ class TestCompactionLoopPrevention:
     async def test_compaction_reduces_token_count(self):
         """After compaction, total tokens MUST decrease."""
         backend = _mock_summary_backend("Discussed 20 questions about testing.")
-        mgr = _make_mgr(window=2000, threshold=0.5, summary_backend=backend)
+        mgr = _make_mgr(window=800, threshold=0.5, summary_backend=backend)
         mgr.add_message(_msg(Role.SYSTEM, "You are codator."))
         for i in range(20):
             mgr.add_message(_msg(Role.USER, f"Question {i}: " + "x" * 80))

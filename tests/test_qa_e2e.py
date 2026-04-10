@@ -61,8 +61,8 @@ class TestAgentPlanParsing:
         assert plan.steps[0].action == "read_file"
         assert plan.steps[1].action == "edit_file"
 
-    def test_parse_plan_invalid_action_skipped(self, agent):
-        """Invalid actions should be filtered out."""
+    def test_parse_plan_invalid_action_raises(self, agent):
+        """Invalid actions should raise ValueError."""
         raw = json.dumps({
             "task": "Do something",
             "reasoning": "testing",
@@ -74,11 +74,8 @@ class TestAgentPlanParsing:
             ],
         })
 
-        plan = agent._parse_plan(raw, "Do something")
-        valid_actions = {"read_file", "edit_file", "create_file",
-                         "run_command", "delete_file", "analyze"}
-        for step in plan.steps:
-            assert step.action in valid_actions
+        with pytest.raises(ValueError, match="Invalid action"):
+            agent._parse_plan(raw, "Do something")
 
     def test_parse_plan_empty_steps(self, agent):
         """Plan with empty steps should not crash."""
@@ -92,12 +89,10 @@ class TestAgentPlanParsing:
         assert len(plan.steps) == 0
 
     def test_parse_plan_malformed_json(self, agent):
-        """Malformed JSON should produce a fallback plan."""
+        """Malformed JSON should raise JSONDecodeError."""
         raw = "This is not JSON at all"
-        plan = agent._parse_plan(raw, "Test task")
-        # Should not crash — returns some plan object
-        assert plan is not None
-        assert plan.task
+        with pytest.raises(json.JSONDecodeError):
+            agent._parse_plan(raw, "Test task")
 
 
 # ===================================================================
