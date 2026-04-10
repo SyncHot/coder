@@ -16,6 +16,7 @@ class Role(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
     SUMMARY = "summary"  # synthetic role for compacted snapshots
+    TOOL = "tool"  # tool result messages for function calling
 
 
 @dataclass
@@ -161,6 +162,7 @@ class GenerationResult:
     time_seconds: float = 0.0
     model_name: str = ""
     stopped_by: str = ""  # "eos", "limit", "error"
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,23 @@ class TerminalTool(Tool):
             "Dangerous commands require human approval."
         )
 
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to execute.",
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "Working directory (optional, defaults to project root).",
+                },
+            },
+            "required": ["command"],
+        }
+
     # ------------------------------------------------------------------
     # Safety checks
     # ------------------------------------------------------------------

@@ -114,6 +114,11 @@ class Tool(ABC):
         """Human-readable description for the model."""
         ...
 
+    @property
+    def parameters_schema(self) -> dict:
+        """JSON Schema for the tool's parameters (OpenAI function calling format)."""
+        return {"type": "object", "properties": {}}
+
     @abstractmethod
     async def execute(self, **kwargs) -> ToolResult:
         """Run the tool with the given parameters."""

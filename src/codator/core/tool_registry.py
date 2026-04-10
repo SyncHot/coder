@@ -65,7 +65,23 @@ class ToolRegistry:
         for tool in self._tools.values():
             lines.append(f"• **{tool.name}**: {tool.description}")
         lines.append(
-            "\nTo use a tool, describe the action you want to take and "
-            "the user will execute it on your behalf."
+            "\nYou can call these tools directly to read files, list directories, "
+            "and run commands. Use them proactively when the user asks about code."
         )
         return "\n".join(lines)
+
+    def to_openai_tools(self) -> list[dict]:
+        """Return tool definitions in OpenAI function-calling format."""
+        tools = []
+        for tool in self._tools.values():
+            schema = tool.parameters_schema
+            if schema:
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": schema,
+                    },
+                })
+        return tools

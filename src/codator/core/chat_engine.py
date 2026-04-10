@@ -24,22 +24,26 @@ from codator.infrastructure.api_clients import ClaudeBackend, OpenAIBackend
 from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
 from codator.infrastructure.ollama_backend import OllamaBackend
 from codator.infrastructure.tools.browser_tool import BrowserTool
+from codator.infrastructure.tools.file_tool import ListDirectoryTool, ReadFileTool
 from codator.infrastructure.tools.ssh_tool import SSHTool
 from codator.infrastructure.tools.terminal_tool import TerminalTool
 
 logger = logging.getLogger(__name__)
+
+MAX_TOOL_ITERATIONS = 10
 
 SYSTEM_PROMPT = """\
 You are **codator**, a senior software engineering assistant running locally. \
 You have direct access to the user's project structure and git state.
 
 Rules:
-1. **Zero-Hallucination Policy**: If you need a file's content and don't have it, \
-ASK the user to provide it. Never guess or fabricate code.
+1. **Use your tools**: When the user asks about code, USE the read_file and \
+list_directory tools to actually look at the files. Do NOT say you can't access files.
 2. Reference the Project Map (provided below) for accurate file/function names.
 3. When the git diff is provided, prioritize reviewing those changes.
 4. Write production-quality code. Explain tradeoffs when relevant.
 5. If unsure, say so — then propose a plan to find the answer.
+6. Use the terminal tool to run commands when needed (tests, installs, etc.).
 
 {project_context}
 {git_context}
@@ -112,9 +116,23 @@ class ChatEngine:
             self._active_model = self._settings.ollama.model
 
     def _register_tools(self):
-        """Register SSH, Browser, and Terminal tools from settings."""
+        """Register all tools including file access."""
         cfg = self._settings
 
+        # File tools (always available)
+        self._tools.register(ReadFileTool(project_root=self._project_root))
+        self._tools.register(ListDirectoryTool(project_root=self._project_root))
+
+        # Terminal tool
+        terminal = TerminalTool(
+            working_dir=self._project_root,
+            timeout=cfg.terminal.timeout,
+            require_confirm=cfg.terminal.require_confirm,
+            dangerous_patterns=cfg.terminal.dangerous_patterns,
+        )
+        self._tools.register(terminal)
+
+        # SSH tool
         ssh = SSHTool(
             host=cfg.ssh.host, port=cfg.ssh.port,
             username=cfg.ssh.username, password=cfg.ssh.password,
@@ -122,6 +140,7 @@ class ChatEngine:
         )
         self._tools.register(ssh)
 
+        # Browser tool
         browser = BrowserTool(
             headless=cfg.browser.headless,
             timeout=cfg.browser.timeout,
@@ -129,14 +148,6 @@ class ChatEngine:
             viewport_height=cfg.browser.viewport_height,
         )
         self._tools.register(browser)
-
-        terminal = TerminalTool(
-            working_dir=cfg.terminal.working_dir,
-            timeout=cfg.terminal.timeout,
-            require_confirm=cfg.terminal.require_confirm,
-            dangerous_patterns=cfg.terminal.dangerous_patterns,
-        )
-        self._tools.register(terminal)
 
     def _build_system_prompt(self) -> str:
         project_ctx = ""
@@ -153,6 +164,10 @@ class ChatEngine:
             project_context=project_ctx,
             git_context=git_ctx,
         ) + ("\n\n" + tools_ctx if tools_ctx else "")
+
+    def _supports_tool_calling(self) -> bool:
+        """Check if the current backend supports native function calling."""
+        return isinstance(self._backend, OllamaBackend)
 
     # ----- Chat -----
 
@@ -182,7 +197,7 @@ class ChatEngine:
         return result
 
     async def chat_stream(self, user_input: str) -> AsyncIterator[str]:
-        """Send a user message and stream the response token by token."""
+        """Send a user message and stream the response, with agentic tool calling."""
         assert self._context is not None, "Call initialize() first"
 
         user_msg = Message(role=Role.USER, content=user_input)
@@ -190,6 +205,13 @@ class ChatEngine:
 
         await self._context.maybe_compact()
 
+        # If backend supports tool calling, use the agentic loop
+        if self._supports_tool_calling():
+            async for token in self._agentic_chat_stream():
+                yield token
+            return
+
+        # Otherwise, plain streaming (no tool calling)
         full_response: list[str] = []
         async for token in self._backend.generate_stream(
             self._context.get_messages(),
@@ -199,10 +221,82 @@ class ChatEngine:
             full_response.append(token)
             yield token
 
-        # Save complete response
         response_text = "".join(full_response)
         assistant_msg = Message(role=Role.ASSISTANT, content=response_text)
         self._context.add_message(assistant_msg)
+
+    async def _agentic_chat_stream(self) -> AsyncIterator[str]:
+        """Agentic loop: generate → detect tool calls → execute → re-generate."""
+        tools_defs = self._tools.to_openai_tools()
+
+        for iteration in range(MAX_TOOL_ITERATIONS):
+            # Non-streaming call with tool support
+            result = await self._backend.generate(
+                self._context.get_messages(),
+                max_tokens=self._settings.inference.max_tokens,
+                temperature=self._settings.inference.temperature,
+                tools=tools_defs,
+            )
+
+            if not result.tool_calls:
+                # Final text response — yield it
+                if result.text:
+                    yield result.text
+                assistant_msg = Message(
+                    role=Role.ASSISTANT,
+                    content=result.text,
+                    token_count=result.tokens_generated,
+                )
+                self._context.add_message(assistant_msg)
+                return
+
+            # Model wants to call tools — process them
+            # Store assistant message with tool_calls metadata
+            raw_tool_calls = []
+            for tc in result.tool_calls:
+                raw_tool_calls.append({
+                    "id": tc.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.tool_name,
+                        "arguments": __import__("json").dumps(tc.parameters),
+                    },
+                })
+
+            assistant_msg = Message(
+                role=Role.ASSISTANT,
+                content=result.text or "",
+                metadata={"tool_calls": raw_tool_calls},
+            )
+            self._context.add_message(assistant_msg)
+
+            # Execute each tool and add results
+            for tc in result.tool_calls:
+                yield f"\n🔧 **{tc.tool_name}**"
+                params_str = ", ".join(f"{k}={v!r}" for k, v in tc.parameters.items())
+                yield f"({params_str})...\n"
+
+                tool_result = await self._tools.execute(tc)
+
+                if tool_result.success:
+                    # Truncate long outputs for display
+                    display = tool_result.output
+                    if len(display) > 500:
+                        display = display[:500] + "\n... [truncated]"
+                    yield f"✅ {display}\n\n"
+                else:
+                    yield f"❌ {tool_result.error}\n\n"
+
+                # Add tool result message to context
+                tool_msg = Message(
+                    role=Role.TOOL,
+                    content=tool_result.output or tool_result.error,
+                    metadata={"tool_call_id": tc.call_id},
+                )
+                self._context.add_message(tool_msg)
+
+        # Safety: if we hit max iterations
+        yield "\n⚠️ Reached maximum tool iterations.\n"
 
     # ----- Model management -----
 

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 from codator.config import AppSettings, get_settings
 from codator.domain.interfaces import InferenceBackend
-from codator.domain.models import GenerationResult, Message, Role
+from codator.domain.models import GenerationResult, Message, Role, ToolCall
 from codator.infrastructure.tokenizer import count_tokens_tiktoken
 
 logger = logging.getLogger(__name__)
@@ -32,32 +34,67 @@ class OllamaBackend(InferenceBackend):
             )
 
     @staticmethod
-    def _prepare_messages(messages: list[Message]) -> list[dict[str, str]]:
-        """Convert messages for Ollama (OpenAI-compatible), routing SUMMARY → system."""
-        result: list[dict[str, str]] = []
+    def _prepare_messages(messages: list[Message]) -> list[dict[str, Any]]:
+        """Convert messages for Ollama, handling SUMMARY, TOOL, and tool_calls."""
+        result: list[dict[str, Any]] = []
         for m in messages:
-            d = m.to_llm_dict()
-            if m.role == Role.SUMMARY:
-                d["role"] = "system"
-            result.append(d)
+            if m.role == Role.TOOL:
+                # Tool result message
+                result.append({
+                    "role": "tool",
+                    "tool_call_id": m.metadata.get("tool_call_id", ""),
+                    "content": m.content,
+                })
+            elif m.role == Role.ASSISTANT and m.metadata.get("tool_calls"):
+                # Assistant message that requested tool calls
+                msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": m.content or None,
+                    "tool_calls": m.metadata["tool_calls"],
+                }
+                result.append(msg)
+            elif m.role == Role.SUMMARY:
+                result.append({"role": "system", "content": m.content})
+            else:
+                result.append(m.to_llm_dict())
         return result
 
     async def generate(
-        self, messages: list[Message], *, max_tokens=2048, temperature=0.3, stream=False,
+        self, messages: list[Message], *, max_tokens=2048, temperature=0.3,
+        stream=False, tools: list[dict] | None = None,
     ) -> GenerationResult:
         self._ensure_client()
         prepared = self._prepare_messages(messages)
 
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": prepared,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
+
         t0 = time.perf_counter()
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=prepared,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        response = await self._client.chat.completions.create(**kwargs)
         elapsed = time.perf_counter() - t0
 
         choice = response.choices[0]
+
+        # Parse tool calls if present
+        tool_calls: list[ToolCall] = []
+        if choice.message.tool_calls:
+            for tc in choice.message.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                tool_calls.append(ToolCall(
+                    tool_name=tc.function.name,
+                    parameters=args,
+                    call_id=tc.id or "",
+                ))
+
         return GenerationResult(
             text=choice.message.content or "",
             tokens_generated=response.usage.completion_tokens if response.usage else 0,
@@ -65,6 +102,7 @@ class OllamaBackend(InferenceBackend):
             time_seconds=elapsed,
             model_name=self._model,
             stopped_by=choice.finish_reason or "stop",
+            tool_calls=tool_calls,
         )
 
     async def generate_stream(
