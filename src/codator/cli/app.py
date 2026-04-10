@@ -115,12 +115,11 @@ async def async_main():
     # Dynamic right prompt — model + mode (shown on same line as input)
     def _rprompt():
         model_name = engine.active_model or "no model"
-        # Shorten long model names for display
         short = model_name
-        if len(short) > 35:
-            short = short[:32] + "…"
-        mode_label = "🤖 AGENT" if engine.mode == "agent" else "💬 CHAT"
-        return HTML(f'<style fg="ansicyan">{short}</style> │ <b>{mode_label}</b>')
+        if len(short) > 30:
+            short = short[:27] + "…"
+        mode_label = "agent" if engine.mode == "agent" else "chat"
+        return HTML(f'<style fg="#666666">{short} · {mode_label}</style>')
 
     # Dynamic bottom toolbar — context bar
     def _toolbar():
@@ -185,9 +184,9 @@ async def async_main():
         while True:
             try:
                 if engine.mode == "agent":
-                    prompt_prefix = HTML('<b><style fg="ansimagenta">agent</style></b><style fg="ansiwhite">❯ </style>')
+                    prompt_prefix = HTML('<b><style fg="ansimagenta">agent</style></b><style fg="ansiwhite"> › </style>')
                 else:
-                    prompt_prefix = HTML('<b><style fg="ansigreen">you</style></b><style fg="ansiwhite">❯ </style>')
+                    prompt_prefix = HTML('<style fg="ansiwhite">> </style>')
                 # prompt_toolkit is sync; run in executor
                 user_input = await asyncio.get_running_loop().run_in_executor(
                     None,
@@ -220,7 +219,7 @@ async def async_main():
             # Chat with streaming
             ctx_before = engine.context_status.get("total_tokens", 0)
             try:
-                console.print("[bold green]codator>[/bold green] ", end="")
+                console.print()  # blank line before response
                 full_response: list[str] = []
                 renderer = StreamingMarkdownRenderer()
 

@@ -374,24 +374,15 @@ async def _handle_ollama(arg: str, engine: ChatEngine) -> None:
 
 
 async def run_agent_task(task: str, engine: ChatEngine) -> None:
-    """Run the interactive agent cycle: Analyze → Propose → Pick → Implement.
-
-    Uses streaming to show model thinking in real-time (like Claude).
-    """
+    """Run the interactive agent cycle: Analyze → Propose → Pick → Implement."""
     import asyncio
-
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-    from rich.table import Table
 
     from codator.core.agent_loop import PlanActVerifyAgent, Proposal
 
     async def _confirm_command(command: str, reason: str) -> bool:
         """Interactive confirmation for dangerous agent commands."""
-        from rich import print as rprint
-
-        rprint(f"[bold yellow]⚠️  Agent wants to run:[/bold yellow] {command}")
-        rprint(f"[dim]Reason: {reason}[/dim]")
+        console.print(f"\n  [yellow]⚠  Agent wants to run:[/yellow] {command}")
+        console.print(f"  [dim]{reason}[/dim]")
         answer = await asyncio.get_event_loop().run_in_executor(
             None, lambda: input("Allow? (y/N): ").strip().lower()
         )
@@ -409,16 +400,17 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
     # --- Helpers ---
 
     def on_step(description: str, status: str) -> None:
-        """Show progress in natural language, not machine format."""
-        icon = {"started": "🔄", "running": "⏳", "done": "✅", "failed": "❌"}.get(
-            status, "•"
-        )
-        # Clean up machine-like descriptions
+        """Claude-style compact step indicator."""
+        icons = {
+            "started": "[dim]●[/dim]",
+            "running": "[yellow]●[/yellow]",
+            "done": "[green]✓[/green]",
+            "failed": "[red]✗[/red]",
+        }
+        icon = icons.get(status, "[dim]·[/dim]")
         msg = description
-        # Don't display raw JSON edit descriptions
         if msg.startswith('{') or msg.startswith('{"'):
             msg = "Applying code change…"
-        # Shorten overly long descriptions
         if len(msg) > 120:
             msg = msg[:117] + "…"
         console.print(f"  {icon} {msg}")
@@ -455,14 +447,12 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
     if chat_context:
         project_context = chat_context + "\n\n" + project_context
 
-    print_info(f"🤖 Agent starting: {task}")
+    print_info(f"● Agent: {task}")
 
     try:
-        # ================================================================
-        # Phase 1: Analyze & Propose
-        # ================================================================
+        # ── Analysis ──
         console.print()
-        console.print("[bold cyan]━━━ Phase 1: Analysis ━━━[/bold cyan]")
+        console.print("  [dim]Analyzing…[/dim]")
 
         _start_thinking("analysis")
 
@@ -476,37 +466,27 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
         _stop_thinking()
 
         if not proposals:
-            console.print("[yellow]No proposals generated. Try a different question.[/yellow]")
+            console.print("  [yellow]No proposals generated. Try rephrasing.[/yellow]")
             return
 
-        # ================================================================
-        # Phase 2: Present proposals to user
-        # ================================================================
-        console.print()
-        console.print("[bold cyan]━━━ Proposals ━━━[/bold cyan]")
+        # ── Proposals ──
         console.print()
 
         _priority_colors = {"high": "red", "medium": "yellow", "low": "green"}
 
         for p in proposals:
             color = _priority_colors.get(p.priority, "white")
-            console.print(
-                Panel(
-                    f"{p.description}\n[dim]File: {p.file}[/dim]",
-                    title=f"[bold][{color}]{p.index + 1}. [{p.priority.upper()}] {p.title}[/{color}][/bold]",
-                    border_style=color,
-                    padding=(0, 1),
-                )
-            )
+            idx = p.index + 1
+            console.print(f"  [{color}]{idx}.[/{color}] [bold]{p.title}[/bold]")
+            console.print(f"     [dim]{p.description}[/dim]")
+            console.print(f"     [dim]→ {p.file}  [{p.priority}][/dim]")
 
-        # ================================================================
-        # Phase 3: User picks which proposals to implement
-        # ================================================================
+        # ── User picks ──
         console.print()
         console.print(
-            "[bold]What next?[/bold] Enter numbers to implement "
-            "(e.g. [cyan]1,3,5[/cyan] or [cyan]all[/cyan]), "
-            "[cyan]none[/cyan] to skip, or type a question/instruction."
+            "  [dim]Enter numbers (e.g.[/dim] [cyan]1,3[/cyan][dim]),[/dim] "
+            "[cyan]all[/cyan][dim], [/dim][cyan]none[/cyan][dim] to skip, "
+            "or type a question.[/dim]"
         )
 
         try:
@@ -539,9 +519,8 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
                     break
 
             if not is_numeric or not selected_indices:
-                # Freeform text — answer the question using gathered analysis
+                # Freeform text — answer using gathered analysis
                 console.print()
-                console.print("[bold cyan]━━━ Answering ━━━[/bold cyan]")
                 _start_thinking("answering")
 
                 answer_prompt = (
@@ -573,14 +552,11 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
 
         console.print()
         console.print(
-            f"[bold green]Implementing {len(selected)} proposal(s)…[/bold green]"
+            f"  [dim]Implementing {len(selected)} proposal(s)…[/dim]"
         )
 
-        # ================================================================
-        # Phase 4: Implement selected proposals
-        # ================================================================
+        # ── Implement ──
         console.print()
-        console.print("[bold cyan]━━━ Phase 2: Implementation ━━━[/bold cyan]")
 
         _start_thinking("implementing")
 
@@ -594,22 +570,20 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
 
         _stop_thinking()
 
-        # ================================================================
-        # Results
-        # ================================================================
-        table = Table(title="Implementation Result", border_style="cyan")
-        table.add_column("Metric", style="bold")
-        table.add_column("Value")
-        table.add_row("Proposals implemented", str(len(selected)))
-        table.add_row("Steps executed", str(len(result.actions)))
-        table.add_row("Heal iterations", str(result.heal_iterations))
-        table.add_row(
-            "Final status",
-            "[green]SUCCESS[/green]" if result.final_success else "[red]FAILED[/red]",
+        # ── Result ──
+        console.print()
+        if result.final_success:
+            console.print("  [green]✓ Done[/green]", end="")
+        else:
+            console.print("  [red]✗ Failed[/red]", end="")
+        console.print(
+            f" [dim]— {len(result.actions)} steps, "
+            f"{result.heal_iterations} heal iterations[/dim]"
         )
         if result.verification.errors:
-            table.add_row("Errors", "\n".join(result.verification.errors[:5]))
-        console.print(table)
+            for err in result.verification.errors[:5]:
+                console.print(f"    [red]{err}[/red]")
+        console.print()
 
     except Exception as exc:
         _stop_thinking()

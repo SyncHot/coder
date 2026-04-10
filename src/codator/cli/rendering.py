@@ -1,4 +1,4 @@
-"""Rich-based rendering helpers for the CLI."""
+"""Rich-based rendering helpers for the CLI — Claude-style minimal UI."""
 
 from __future__ import annotations
 
@@ -11,14 +11,13 @@ console = Console()
 
 
 def print_welcome(model: str, hw_summary: str):
-    console.print(Panel(
-        f"[bold cyan]codator[/bold cyan] — Dev-Assistant-OS\n"
-        f"Model: [green]{model or 'none'}[/green]\n"
-        f"{hw_summary}\n\n"
-        f"Type [bold]/help[/bold] for commands, [bold]/quit[/bold] to exit.",
-        title="🤖 codator",
-        border_style="cyan",
-    ))
+    """Minimal Claude-style startup — no heavy box."""
+    console.print()
+    console.print(f"  [bold cyan]codator[/bold cyan] [dim]— Dev-Assistant-OS[/dim]")
+    console.print(f"  [dim]{hw_summary}[/dim]")
+    console.print(f"  [dim]Model:[/dim] [green]{model or 'none'}[/green]")
+    console.print(f"  [dim]Type[/dim] /help [dim]for commands,[/dim] /quit [dim]to exit.[/dim]")
+    console.print()
 
 
 def print_assistant(text: str):
@@ -259,28 +258,24 @@ def print_help():
 
 
 def print_tool_result(result):
-    """Render a ToolResult in the terminal."""
+    """Compact Claude-style tool result — one or two lines, no box."""
     from codator.domain.models import ToolResult
 
     if not isinstance(result, ToolResult):
-        console.print(f"[dim]{result}[/dim]")
+        console.print(f"  [dim]{result}[/dim]")
         return
 
     if result.success:
-        style = "green"
-        icon = "✓"
+        icon = "[green]✓[/green]"
     else:
-        style = "red"
-        icon = "✗"
+        icon = "[red]✗[/red]"
 
-    console.print(Panel(
-        f"[{style}]{icon}[/{style}] "
-        + (f"[bold]{result.output}[/bold]" if result.output else "")
-        + (f"\n[red]{result.error}[/red]" if result.error else "")
-        + (
-            f"\n[dim]exit code: {result.exit_code}[/dim]"
-            if result.exit_code is not None else ""
-        ),
-        title="Tool Result",
-        border_style=style,
-    ))
+    # Main line
+    output = result.output or ""
+    if len(output) > 200:
+        output = output[:197] + "…"
+    console.print(f"  {icon} {output}" if output else f"  {icon} [dim](no output)[/dim]")
+
+    if result.error:
+        for line in result.error.strip().split("\n")[:5]:
+            console.print(f"    [red]{line}[/red]")
