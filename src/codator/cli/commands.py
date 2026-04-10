@@ -332,7 +332,31 @@ async def _handle_agent(arg: str, engine: ChatEngine) -> None:
 
     print_info(f"🤖 Agent starting: {arg}")
     try:
-        result = await agent.run(arg, on_step=on_step)
+        # Build project context with file tree so the agent knows where files are
+        project_context = ""
+        try:
+            from pathlib import Path
+            root = Path(engine._project_root).resolve()
+            code_exts = {".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp", ".rb"}
+            files = []
+            for f in sorted(root.rglob("*")):
+                if f.is_file() and f.suffix in code_exts:
+                    rel = f.relative_to(root)
+                    # Skip hidden dirs, __pycache__, node_modules, .venv
+                    parts = rel.parts
+                    if any(p.startswith(".") or p in (
+                        "__pycache__", "node_modules", ".venv", "venv",
+                    ) for p in parts):
+                        continue
+                    files.append(str(rel))
+            if files:
+                project_context = "Project file tree:\n" + "\n".join(files[:200])
+                if len(files) > 200:
+                    project_context += f"\n... and {len(files) - 200} more files"
+        except Exception:
+            pass
+
+        result = await agent.run(arg, project_context=project_context, on_step=on_step)
 
         # Summary
         table = Table(title="Agent Result", border_style="cyan")

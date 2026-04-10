@@ -149,8 +149,9 @@ class PlanActVerifyAgent:
             )
         return resolved
 
-    async def _ollama_chat(self, system: str, user: str) -> str:
-        """Call Ollama POST /api/chat with format:'json' and return content."""
+    async def _ollama_chat(self, system: str, user: str,
+                          *, force_json: bool = True) -> str:
+        """Call Ollama POST /api/chat and return content."""
         payload = {
             "model": self._model,
             "messages": [
@@ -158,8 +159,9 @@ class PlanActVerifyAgent:
                 {"role": "user", "content": user},
             ],
             "stream": False,
-            "format": "json",
         }
+        if force_json:
+            payload["format"] = "json"
         async with httpx.AsyncClient(
             base_url=self._base_url, timeout=120.0
         ) as client:
@@ -476,7 +478,7 @@ class PlanActVerifyAgent:
                 verification = VerifyResult(success=True)
                 await _notify("Analysis complete", "done")
 
-                # Generate a summary response from the model
+                # Generate a summary response from the model (plain text, not JSON)
                 summary_prompt = (
                     f"Based on your analysis of the code, answer the user's "
                     f"original question:\n\n{task}\n\n"
@@ -486,15 +488,11 @@ class PlanActVerifyAgent:
                     summary = await self._ollama_chat(
                         "You are a helpful coding assistant. Provide a clear, "
                         "actionable review of the code. Be specific about what "
-                        "is good and what should be improved.",
+                        "is good and what should be improved. "
+                        "Respond in the same language as the user's question.",
                         summary_prompt,
+                        force_json=False,
                     )
-                    # Parse JSON response (model may wrap in JSON due to format)
-                    try:
-                        parsed = json.loads(summary)
-                        summary = parsed.get("response", parsed.get("answer", str(parsed)))
-                    except (json.JSONDecodeError, TypeError):
-                        pass
                     all_actions.append(ActionResult(
                         step=AgentStep(
                             index=len(all_actions),
