@@ -26,6 +26,9 @@ DEFAULT_DANGEROUS_PATTERNS: list[str] = [
     r"init\s+0",
 ]
 
+# Max output size (1 MB) to prevent memory exhaustion from commands like `yes` or `cat /dev/zero`
+MAX_OUTPUT_SIZE = 1_000_000
+
 # Type for the confirmation callback:
 #   async def confirm(command: str, reason: str) -> bool
 ConfirmCallback = Callable[[str, str], Awaitable[bool]]
@@ -57,8 +60,10 @@ class TerminalTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Execute local shell commands in a sandboxed environment. "
-            "Dangerous commands require human approval."
+            "Execute a shell command in the project directory. "
+            "Timeout: 60s. Output limit: 1MB. "
+            "Dangerous commands (rm -rf /, sudo rm, mkfs, dd, chmod 777, shutdown, reboot) require human approval. "
+            "Use for: running tests, installing packages, git operations, builds."
         )
 
     @property
@@ -68,7 +73,7 @@ class TerminalTool(Tool):
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute.",
+                    "description": "Shell command to execute (e.g. 'python -m pytest tests/', 'git status', 'npm install').",
                 },
                 "working_dir": {
                     "type": "string",
@@ -140,6 +145,15 @@ class TerminalTool(Tool):
 
             out = stdout.decode("utf-8", errors="replace")
             err = stderr.decode("utf-8", errors="replace")
+            truncated = False
+            if len(out) > MAX_OUTPUT_SIZE:
+                out = out[:MAX_OUTPUT_SIZE] + "\n... [OUTPUT TRUNCATED AT 1MB]"
+                truncated = True
+            if len(err) > MAX_OUTPUT_SIZE:
+                err = err[:MAX_OUTPUT_SIZE] + "\n... [OUTPUT TRUNCATED AT 1MB]"
+                truncated = True
+            if truncated:
+                logger.warning("Command output truncated (exceeded %d bytes)", MAX_OUTPUT_SIZE)
             code = proc.returncode or 0
 
             return ToolResult(

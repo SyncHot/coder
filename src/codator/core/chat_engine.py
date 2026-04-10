@@ -31,6 +31,8 @@ from codator.infrastructure.ollama_backend import OllamaBackend
 from codator.infrastructure.tools.browser_tool import BrowserTool
 from codator.infrastructure.tools.file_tool import (
     EditFileTool,
+    GlobTool,
+    GrepTool,
     ListDirectoryTool,
     ReadFileTool,
     WriteFileTool,
@@ -68,35 +70,59 @@ class _ConfirmingTool(Tool):
 
     async def execute(self, **kwargs) -> ToolResult:
         cb = self._engine._confirm_callback
-        if cb is not None:
-            summary = f"{self.name}: {json.dumps(kwargs, default=str)[:200]}"
-            approved = await cb(self.name, summary)
-            if not approved:
-                return ToolResult(
-                    success=False,
-                    error="Write operation rejected by user.",
-                )
+        if cb is None:
+            logger.warning("Write blocked — no confirmation handler: %s", self.name)
+            return ToolResult(
+                success=False,
+                error="Write operation blocked: no confirmation handler configured. "
+                "Call engine.set_confirm_callback() first.",
+            )
+        summary = f"{self.name}: {json.dumps(kwargs, default=str)[:200]}"
+        approved = await cb(self.name, summary)
+        if not approved:
+            return ToolResult(
+                success=False,
+                error="Write operation rejected by user.",
+            )
         return await self._inner.execute(**kwargs)
 
     async def close(self) -> None:
         await self._inner.close()
 
 SYSTEM_PROMPT = """\
-You are **codator**, a senior software engineering assistant running locally. \
-You have direct access to the user's project structure and git state.
+You are **codator**, a senior software engineering assistant with direct access to \
+the user's project files, terminal, and git state.
 
-Rules:
-1. **Read before writing**: ALWAYS use read_file and list_directory FIRST to \
-understand the code before making any changes. NEVER write or edit files without \
-reading them first.
-2. **Use your tools**: When the user asks about code, USE the read_file and \
-list_directory tools to actually look at the files. Do NOT say you can't access files.
-3. Reference the Project Map (provided below) for accurate file/function names.
-4. When the git diff is provided, prioritize reviewing those changes.
-5. Write production-quality code. Explain tradeoffs when relevant.
-6. If unsure, say so — then propose a plan to find the answer.
-7. Use the terminal tool to run commands when needed (tests, installs, etc.).
-8. When calling tools, output ONLY the JSON tool call, no extra text around it.
+## Approach
+1. **PLAN first**: Before acting, briefly state what you will do and why.
+2. **READ before WRITE**: ALWAYS use read_file, grep, or list_directory FIRST \
+to understand the code. NEVER edit files you haven't read.
+3. **VERIFY after EDIT**: After editing a file, read it back to confirm changes \
+applied correctly. Run tests if available.
+4. **One step at a time**: Don't try to do everything in one tool call. \
+Explore → understand → plan → act → verify.
+
+## Project Navigation
+- Use the Project Map below as your source of truth for file paths.
+- NEVER guess file paths. If unsure, use list_directory or glob to explore.
+- Use grep to find definitions, usages, and patterns across files.
+
+## Tool Constraints
+- **read_file**: Max 256KB, text files only.
+- **edit_file**: Requires EXACT text match (character-for-character). If rejected, \
+re-read the file to get current content.
+- **terminal**: 60s timeout, 1MB output limit. Dangerous commands need approval.
+- **write_file**: Overwrites the entire file. Use edit_file for partial changes.
+
+## Error Handling
+- If a tool call fails, analyze the error and try a different approach.
+- If edit_file can't find old_text, re-read the file — content may have changed.
+- Always report unexpected errors to the user.
+
+## Communication
+- When calling tools, output ONLY the JSON tool call, no extra text around it.
+- Write production-quality code. Explain tradeoffs when relevant.
+- When the git diff is provided, prioritize reviewing those changes.
 
 {project_context}
 {git_context}
@@ -243,6 +269,8 @@ class ChatEngine:
         # File tools — read always; write/edit with confirmation gate
         self._tools.register(ReadFileTool(project_root=self._project_root))
         self._tools.register(ListDirectoryTool(project_root=self._project_root))
+        self._tools.register(GrepTool(project_root=self._project_root))
+        self._tools.register(GlobTool(project_root=self._project_root))
 
         # Write/edit tools with human-in-the-loop confirmation
         self._write_tool = WriteFileTool(project_root=self._project_root)

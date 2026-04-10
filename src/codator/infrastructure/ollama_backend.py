@@ -137,7 +137,11 @@ class OllamaBackend(InferenceBackend):
                 yield delta.content
 
     def count_tokens(self, text: str) -> int:
-        return count_tokens_tiktoken(text)
+        # tiktoken cl100k_base underestimates tokens for non-OpenAI models
+        # (Qwen, Llama, Mistral, etc.) by 15-25%. Apply 20% safety margin
+        # to trigger context compaction at the right time.
+        base = count_tokens_tiktoken(text)
+        return int(base * 1.20)
 
     def switch_model(self, model: str, num_ctx: int = 0) -> None:
         """Switch to a different model without recreating the HTTP client."""

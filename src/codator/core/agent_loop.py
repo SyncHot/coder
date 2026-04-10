@@ -479,8 +479,8 @@ class PlanActVerifyAgent:
                     best_ratio = ratio
                     best_span = (i, i + m)
 
-        # Require at least 55% character-level similarity
-        if best_ratio < 0.55 or best_span is None:
+        # Require at least 70% character-level similarity
+        if best_ratio < 0.70 or best_span is None:
             return None
 
         start_line, end_line = best_span
