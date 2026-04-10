@@ -813,8 +813,9 @@ class ContextualIndex:
         self._embeddings = []
         total = len(self._chunks)
 
-        import httpx
         import time as _time
+
+        import httpx
 
         t0 = _time.monotonic()
         async with httpx.AsyncClient(timeout=30) as client:
