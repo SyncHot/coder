@@ -5,8 +5,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from codator.domain.models import ToolCall, ToolResult
 
+from codator.domain.models import ToolCall, ToolResult
 
 # ---------------------------------------------------------------------------
 # Terminal Tool tests (no external deps needed)
