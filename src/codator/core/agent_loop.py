@@ -653,7 +653,8 @@ class PlanActVerifyAgent:
             a.output for a in all_actions if a.success and a.output
         )
 
-        # Ask model to produce structured proposals
+        # Ask model to produce structured proposals (no streaming — output is
+        # machine-readable JSON that gets parsed and displayed as rich panels)
         await _notify("Generating proposals…", "running")
         propose_prompt = (
             f"User's request:\n{task}\n\n"
@@ -661,7 +662,7 @@ class PlanActVerifyAgent:
             f"Project context:\n{project_context[:4000]}"
         )
         raw = await self._ollama_chat(
-            _PROPOSE_SYSTEM, propose_prompt, on_token=on_token,
+            _PROPOSE_SYSTEM, propose_prompt,
         )
         proposals = self._parse_proposals(raw)
         await _notify(f"{len(proposals)} proposals ready", "done")

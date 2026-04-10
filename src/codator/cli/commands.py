@@ -476,37 +476,71 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
         # ================================================================
         console.print()
         console.print(
-            "[bold]Which proposals to implement?[/bold] "
-            "(e.g. [cyan]1,3,5[/cyan] or [cyan]all[/cyan] or [cyan]none[/cyan])"
+            "[bold]What next?[/bold] Enter numbers to implement "
+            "(e.g. [cyan]1,3,5[/cyan] or [cyan]all[/cyan]), "
+            "[cyan]none[/cyan] to skip, or type a question/instruction."
         )
 
         try:
             choice = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: input("implement> ").strip().lower(),
+                None, lambda: input("implement> ").strip(),
             )
         except (EOFError, KeyboardInterrupt):
             print_info("Cancelled.")
             return
 
-        if not choice or choice == "none":
-            print_info("No proposals selected. Done.")
+        choice_lower = choice.lower()
+
+        if not choice or choice_lower == "none":
+            print_info("Done.")
             return
 
-        if choice == "all":
+        if choice_lower == "all":
             selected = proposals
         else:
-            # Parse comma-separated numbers
+            # Try to parse comma-separated numbers first
             selected_indices: set[int] = set()
-            for part in choice.replace(" ", "").split(","):
+            is_numeric = True
+            for part in choice_lower.replace(" ", "").split(","):
                 try:
                     idx = int(part) - 1  # 1-based → 0-based
                     if 0 <= idx < len(proposals):
                         selected_indices.add(idx)
                 except ValueError:
-                    pass
-            if not selected_indices:
-                print_info("No valid selections. Done.")
+                    is_numeric = False
+                    break
+
+            if not is_numeric or not selected_indices:
+                # Freeform text — answer the question using gathered analysis
+                console.print()
+                console.print("[bold cyan]━━━ Answering ━━━[/bold cyan]")
+                _start_thinking("answering")
+
+                answer_prompt = (
+                    f"User's original request:\n{task}\n\n"
+                    f"Proposals generated:\n"
+                    + "\n".join(
+                        f"  {p.index + 1}. [{p.priority}] {p.title}: {p.description} (file: {p.file})"
+                        for p in proposals
+                    )
+                    + f"\n\nUser's follow-up question/instruction:\n{choice}\n\n"
+                    "Answer in a clear, conversational way. "
+                    "Respond in the same language as the user."
+                )
+                from codator.core.agent_loop import PlanActVerifyAgent
+
+                answer_raw = await agent._ollama_chat(
+                    "You are a helpful code assistant. Answer questions about the "
+                    "analysis and proposals you generated. Be concise and specific.",
+                    answer_prompt,
+                    force_json=False,
+                    on_token=on_token,
+                )
+                _stop_thinking()
+                # The answer was already streamed via on_token; print a newline
+                console.print()
                 return
+
             selected = [p for p in proposals if p.index in selected_indices]
 
         console.print()

@@ -210,6 +210,9 @@ async def async_main():
 
             # Agent mode — run through Plan-Act-Verify
             if engine.mode == "agent":
+                # Skip no-ops that aren't real tasks
+                if user_input.lower() in ("none", "exit", "quit", "back", "cancel", "no"):
+                    continue
                 from codator.cli.commands import run_agent_task
                 await run_agent_task(user_input, engine)
                 continue
