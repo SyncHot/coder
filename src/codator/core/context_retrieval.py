@@ -813,24 +813,36 @@ class ContextualIndex:
         self._embeddings = []
         total = len(self._chunks)
 
-        for start in range(0, total, batch_size):
-            batch = self._chunks[start : start + batch_size]
-            tasks = [
-                _get_embedding(
-                    c.content[:2048],
-                    model,
-                    ollama_url,
-                )
-                for c in batch
-            ]
-            results = await asyncio.gather(*tasks)
-            for emb in results:
-                self._embeddings.append(emb or [])
+        import httpx
+        import time as _time
+
+        t0 = _time.monotonic()
+        async with httpx.AsyncClient(timeout=30) as client:
+            for start in range(0, total, batch_size):
+                batch = self._chunks[start : start + batch_size]
+                tasks = [
+                    _get_embedding_with_client(
+                        client, c.content[:2048], model, ollama_url,
+                    )
+                    for c in batch
+                ]
+                results = await asyncio.gather(*tasks)
+                for emb in results:
+                    self._embeddings.append(emb or [])
+                done = min(start + batch_size, total)
+                elapsed = _time.monotonic() - t0
+                if done < total:
+                    eta = elapsed / done * (total - done)
+                    logger.info(
+                        "Embedding progress: %d/%d (%.0f%%) ETA %.0fs",
+                        done, total, done / total * 100, eta,
+                    )
 
         valid = sum(1 for e in self._embeddings if e)
+        elapsed = _time.monotonic() - t0
         logger.info(
-            "Built embeddings for %d/%d chunks (model=%s)",
-            valid, total, model,
+            "Built embeddings for %d/%d chunks in %.1fs (model=%s)",
+            valid, total, elapsed, model,
         )
 
         # Persist to cache for fast restarts
@@ -845,6 +857,25 @@ class ContextualIndex:
 # ---------------------------------------------------------------------------
 # Module-level embedding + similarity helpers
 # ---------------------------------------------------------------------------
+
+async def _get_embedding_with_client(
+    client,
+    text: str,
+    model: str = "nomic-embed-text",
+    ollama_url: str = "http://localhost:11434",
+) -> list[float]:
+    """Get embedding vector from Ollama using a shared httpx client."""
+    try:
+        resp = await client.post(
+            f"{ollama_url}/api/embeddings",
+            json={"model": model, "prompt": text},
+        )
+        resp.raise_for_status()
+        return resp.json().get("embedding", [])
+    except Exception as exc:
+        logger.debug("Embedding request failed: %s", exc)
+        return []
+
 
 async def _get_embedding(
     text: str,

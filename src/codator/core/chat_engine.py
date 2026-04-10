@@ -157,11 +157,21 @@ class ChatEngine:
             if isinstance(self._backend, OllamaBackend):
                 try:
                     url = self._settings.ollama.base_url
-                    embedded = await self._contextual_index.build_embeddings(
-                        model="nomic-embed-text",
-                        ollama_url=url,
+                    has_cache = self._contextual_index._load_cached_embeddings(
+                        "nomic-embed-text",
                     )
-                    logger.info("Embeddings: %d chunks", embedded)
+                    if has_cache:
+                        logger.info("Embeddings loaded from cache")
+                    else:
+                        logger.info(
+                            "Building embeddings for %d chunks (first run)...",
+                            chunk_count,
+                        )
+                        embedded = await self._contextual_index.build_embeddings(
+                            model="nomic-embed-text",
+                            ollama_url=url,
+                        )
+                        logger.info("Embeddings: %d chunks", embedded)
                 except Exception as emb_exc:
                     logger.debug("Embedding build skipped: %s", emb_exc)
         except Exception as exc:

@@ -94,7 +94,13 @@ async def async_main():
     engine.set_confirm_callback(_cli_confirm)
 
     print_info("Initializing...")
+
+    import time as _time
+    _t0 = _time.monotonic()
     await engine.initialize(model_path=args.model)
+    _elapsed = _time.monotonic() - _t0
+    if _elapsed > 2.0:
+        print_info(f"Ready in {_elapsed:.1f}s")
 
     print_welcome(engine.active_model, hw_summary)
 
