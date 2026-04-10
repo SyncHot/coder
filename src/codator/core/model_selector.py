@@ -311,5 +311,7 @@ class ModelSelector:
         # Nothing fits — return the smallest known model anyway and let
         # Ollama deal with the consequences.
         smallest = self.FAST_MODELS[0] if self.FAST_MODELS else next(iter(self._available))
-        logger.error("No model fits in %d MiB VRAM — selecting %s anyway", self._vram_total, smallest)
+        logger.error(
+            "No model fits in %d MiB VRAM — selecting %s anyway", self._vram_total, smallest,
+        )
         return smallest

@@ -239,7 +239,9 @@ class ListDirectoryTool(Tool):
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Directory path relative to the project root. Use '.' for project root.",
+                    "description": (
+                        "Directory path relative to project root. '.' for root."
+                    ),
                 },
             },
             "required": ["path"],

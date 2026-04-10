@@ -445,7 +445,6 @@ class ContextualIndex:
             return []
 
         from codator.core.project_indexer import SYMBOL_QUERIES
-        from codator.domain.models import Symbol
 
         query_map = SYMBOL_QUERIES.get(language, {})
         if not query_map:

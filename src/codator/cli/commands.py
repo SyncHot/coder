@@ -290,7 +290,6 @@ async def _handle_agent(arg: str, engine: ChatEngine) -> None:
         )
         return
 
-    from rich.live import Live
     from rich.table import Table
 
     from codator.core.agent_loop import PlanActVerifyAgent

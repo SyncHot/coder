@@ -71,7 +71,7 @@ class GPUMonitor:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_ROCM_TIMEOUT)
             if proc.returncode == 0:
                 return stdout.decode()
-        except (asyncio.TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError) as exc:
             logger.debug("rocm-smi %s failed: %s", args, exc)
         return None
 

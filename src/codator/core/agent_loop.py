@@ -8,7 +8,7 @@ import logging
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 import httpx
 
@@ -261,7 +261,7 @@ class PlanActVerifyAgent:
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.communicate()
             raise TimeoutError(
@@ -351,7 +351,7 @@ class PlanActVerifyAgent:
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
             return stdout.decode(errors="replace")
-        except (asyncio.TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError) as exc:
             logger.warning("Verification command %r failed: %s", cmd, exc)
             return None
 
