@@ -78,6 +78,20 @@ async def async_main():
 
     # Chat engine
     engine = ChatEngine(settings=settings, project_root=args.project)
+
+    # Wire up write/edit confirmation callback for CLI
+    async def _cli_confirm(tool_name: str, summary: str) -> bool:
+        console.print(f"\n⚠️  [bold yellow]{tool_name}[/]: {summary}")
+        try:
+            answer = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: input("Allow? [y/N] ").strip().lower(),
+            )
+            return answer in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    engine.set_confirm_callback(_cli_confirm)
+
     print_info("Initializing...")
     await engine.initialize(model_path=args.model)
 

@@ -135,6 +135,11 @@ class OllamaBackend(InferenceBackend):
     def count_tokens(self, text: str) -> int:
         return count_tokens_tiktoken(text)
 
+    def switch_model(self, model: str, num_ctx: int = 0) -> None:
+        """Switch to a different model without recreating the HTTP client."""
+        self._model = model
+        self._num_ctx = num_ctx
+
     async def close(self) -> None:
         if self._client:
             await self._client.close()

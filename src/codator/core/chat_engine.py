@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from codator.config import AppSettings, get_settings
@@ -15,7 +15,7 @@ from codator.core.git_integration import GitContext
 from codator.core.model_selector import ModelSelector
 from codator.core.project_indexer import TreeSitterProjectIndexer
 from codator.core.tool_registry import ToolRegistry
-from codator.domain.interfaces import InferenceBackend
+from codator.domain.interfaces import InferenceBackend, Tool
 from codator.domain.models import (
     GenerationResult,
     Message,
@@ -29,8 +29,10 @@ from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
 from codator.infrastructure.ollama_backend import OllamaBackend
 from codator.infrastructure.tools.browser_tool import BrowserTool
 from codator.infrastructure.tools.file_tool import (
+    EditFileTool,
     ListDirectoryTool,
     ReadFileTool,
+    WriteFileTool,
 )
 from codator.infrastructure.tools.ssh_tool import SSHTool
 from codator.infrastructure.tools.terminal_tool import TerminalTool
@@ -38,6 +40,44 @@ from codator.infrastructure.tools.terminal_tool import TerminalTool
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 5
+
+# Type for the user confirmation callback used by write/edit tools
+ConfirmCallback = Callable[[str, str], Awaitable[bool]]
+
+
+class _ConfirmingTool(Tool):
+    """Wrapper that asks for human confirmation before executing a tool."""
+
+    def __init__(self, inner: Tool, engine: ChatEngine) -> None:
+        self._inner = inner
+        self._engine = engine
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    @property
+    def description(self) -> str:
+        return self._inner.description
+
+    @property
+    def parameters_schema(self) -> dict:
+        return self._inner.parameters_schema
+
+    async def execute(self, **kwargs) -> ToolResult:
+        cb = self._engine._confirm_callback
+        if cb is not None:
+            summary = f"{self.name}: {json.dumps(kwargs, default=str)[:200]}"
+            approved = await cb(self.name, summary)
+            if not approved:
+                return ToolResult(
+                    success=False,
+                    error="Write operation rejected by user.",
+                )
+        return await self._inner.execute(**kwargs)
+
+    async def close(self) -> None:
+        await self._inner.close()
 
 SYSTEM_PROMPT = """\
 You are **codator**, a senior software engineering assistant running locally. \
@@ -79,6 +119,7 @@ class ChatEngine:
         self._tools = ToolRegistry()
         self._model_selector: ModelSelector | None = None
         self._contextual_index: ContextualIndex | None = None
+        self._confirm_callback: ConfirmCallback | None = None
 
     # ----- Lifecycle -----
 
@@ -157,9 +198,15 @@ class ChatEngine:
         """Register all tools including file access."""
         cfg = self._settings
 
-        # File tools — read-only always available; write tools only via /agent
+        # File tools — read always; write/edit with confirmation gate
         self._tools.register(ReadFileTool(project_root=self._project_root))
         self._tools.register(ListDirectoryTool(project_root=self._project_root))
+
+        # Write/edit tools with human-in-the-loop confirmation
+        self._write_tool = WriteFileTool(project_root=self._project_root)
+        self._edit_tool = EditFileTool(project_root=self._project_root)
+        self._tools.register(_ConfirmingTool(self._write_tool, self))
+        self._tools.register(_ConfirmingTool(self._edit_tool, self))
 
         # Terminal tool
         terminal = TerminalTool(
@@ -243,28 +290,33 @@ class ChatEngine:
             current_tokens = self._context.total_tokens()
             choice = self._model_selector.select_model(user_input, current_tokens)
             if choice.model_name != self._active_model:
-                await self._backend.close()
-                self._backend = OllamaBackend(
-                    self._settings, model=choice.model_name, num_ctx=choice.num_ctx,
-                )
+                self._backend.switch_model(choice.model_name, choice.num_ctx)
                 self._active_model = choice.model_name
-                logger.info("Auto-switched to %s (num_ctx=%d)", choice.model_name, choice.num_ctx)
+                logger.info(
+                    "Auto-switched to %s (num_ctx=%d)",
+                    choice.model_name, choice.num_ctx,
+                )
 
-        # Inject relevant code context from contextual index
-        context_block = ""
+        # Inject relevant code context as ephemeral system message
+        # (keeps conversation history clean — retrieval context is not persisted)
         if self._contextual_index:
             try:
                 chunks = self._contextual_index.search(user_input, top_k=3)
                 if chunks:
-                    context_block = self._contextual_index.format_chunks_for_prompt(chunks)
+                    context_block = (
+                        self._contextual_index
+                        .format_chunks_for_prompt(chunks)
+                    )
+                    ctx_msg = Message(
+                        role=Role.SYSTEM,
+                        content=f"Relevant code context:\n{context_block}",
+                        metadata={"ephemeral": True},
+                    )
+                    self._context.add_message(ctx_msg)
             except Exception as exc:
                 logger.debug("Contextual search failed: %s", exc)
 
-        enriched_input = user_input
-        if context_block:
-            enriched_input = f"{user_input}\n\n{context_block}"
-
-        user_msg = Message(role=Role.USER, content=enriched_input)
+        user_msg = Message(role=Role.USER, content=user_input)
         self._context.add_message(user_msg)
 
         await self._context.maybe_compact()
@@ -364,10 +416,22 @@ class ChatEngine:
                 return
             seen_calls.update(call_keys)
 
-            # Model wants to call tools — store assistant message
+            # Model wants to call tools — store assistant message with tool_calls metadata
+            raw_tool_calls = []
+            for tc in tool_calls:
+                raw_tool_calls.append({
+                    "id": tc.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.tool_name,
+                        "arguments": json.dumps(tc.parameters),
+                    },
+                })
             assistant_msg = Message(
                 role=Role.ASSISTANT,
                 content=result.text or "",
+                metadata={"tool_calls": raw_tool_calls},
+            )
             )
             self._context.add_message(assistant_msg)
 
@@ -387,13 +451,14 @@ class ChatEngine:
                 else:
                     yield f"❌ {tool_result.error}\n\n"
 
-                # Add tool result as user message (works with all models)
+                # Add tool result as TOOL message (proper role for function calling)
                 result_text = tool_result.output or tool_result.error
                 if len(result_text) > 8000:
                     result_text = result_text[:8000] + "\n... [truncated]"
                 tool_msg = Message(
-                    role=Role.USER,
-                    content=f"[Tool result for {tc.tool_name}]:\n{result_text}",
+                    role=Role.TOOL,
+                    content=result_text,
+                    metadata={"tool_call_id": tc.call_id},
                 )
                 self._context.add_message(tool_msg)
 
@@ -402,48 +467,33 @@ class ChatEngine:
 
     @staticmethod
     def _parse_text_tool_calls(text: str) -> list[ToolCall]:
-        """Parse tool calls from model text output (fallback for non-native tool calling).
+        """Parse tool calls from model text output (fallback for non-native).
 
-        Handles patterns like:
-          {"name": "read_file", "arguments": {"path": "src/main.py"}}
-          <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+        Uses balanced-brace extraction instead of regex to handle nested JSON.
         """
         calls: list[ToolCall] = []
-
-        # Try to find JSON objects with "name" and "arguments" keys
-        # Match standalone JSON objects
-        json_pattern = re.compile(
-            r'\{[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*"arguments"\s*:\s*(\{[^{}]*\})[^{}]*\}',
-            re.DOTALL,
-        )
-        for match in json_pattern.finditer(text):
+        decoder = json.JSONDecoder()
+        i = 0
+        while i < len(text):
+            # Find next '{'
+            idx = text.find("{", i)
+            if idx == -1:
+                break
             try:
-                name = match.group(1)
-                args = json.loads(match.group(2))
-                calls.append(ToolCall(
-                    tool_name=name,
-                    parameters=args,
-                    call_id=f"text_{name}",
-                ))
-            except (json.JSONDecodeError, IndexError):
-                continue
-
-        if calls:
-            return calls
-
-        # Try parsing the entire text as a JSON tool call
-        stripped = text.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
-            try:
-                data = json.loads(stripped)
-                if "name" in data and "arguments" in data:
+                obj, end = decoder.raw_decode(text, idx)
+                if (
+                    isinstance(obj, dict)
+                    and "name" in obj
+                    and "arguments" in obj
+                ):
                     calls.append(ToolCall(
-                        tool_name=data["name"],
-                        parameters=data.get("arguments", {}),
-                        call_id=f"text_{data['name']}",
+                        tool_name=obj["name"],
+                        parameters=obj.get("arguments", {}),
+                        call_id=f"text_{obj['name']}",
                     ))
-            except json.JSONDecodeError:
-                pass
+                i = idx + end
+            except (json.JSONDecodeError, ValueError):
+                i = idx + 1
 
         return calls
 
@@ -478,8 +528,11 @@ class ChatEngine:
 
     async def switch_ollama_model(self, model: str) -> str:
         """Switch to a specific Ollama model."""
-        await self._backend.close()
-        self._backend = OllamaBackend(self._settings, model=model)
+        if isinstance(self._backend, OllamaBackend):
+            self._backend.switch_model(model)
+        else:
+            await self._backend.close()
+            self._backend = OllamaBackend(self._settings, model=model)
         self._active_model = model
         return f"Switched to Ollama model: {model}"
 
@@ -496,6 +549,10 @@ class ChatEngine:
     @property
     def contextual_index(self) -> ContextualIndex | None:
         return self._contextual_index
+
+    def set_confirm_callback(self, cb: ConfirmCallback | None) -> None:
+        """Set the human-in-the-loop confirmation callback for write/edit tools."""
+        self._confirm_callback = cb
 
     @property
     def context_status(self) -> dict[str, Any]:
