@@ -992,6 +992,7 @@ class PlanActVerifyAgent:
 
         # 1. Try exact match
         if old_text in content:
+            new_text = self._align_indentation(old_text, new_text)
             content = content.replace(old_text, new_text, 1)
             path.write_text(content, encoding="utf-8")
             return f"Edited {file_rel} (exact match, backup at {backup.name})"
@@ -1000,20 +1001,8 @@ class PlanActVerifyAgent:
         match_pos = self._fuzzy_find(content, old_text)
         if match_pos is not None:
             start, end = match_pos
-            # Preserve indentation of the first matched line
             matched_block = content[start:end]
-            matched_lines = matched_block.splitlines(keepends=True)
-            new_lines = new_text.splitlines(keepends=True)
-            if matched_lines and new_lines:
-                import re
-                orig_indent = re.match(r"(\s*)", matched_lines[0]).group(1)
-                new_indent = re.match(r"(\s*)", new_lines[0]).group(1)
-                if orig_indent and not new_indent:
-                    # LLM omitted indentation — reindent new_text
-                    new_text = "".join(
-                        orig_indent + l if l.strip() else l
-                        for l in new_lines
-                    )
+            new_text = self._align_indentation(matched_block, new_text)
             content = content[:start] + new_text + content[end:]
             path.write_text(content, encoding="utf-8")
             return f"Edited {file_rel} (fuzzy match, backup at {backup.name})"
@@ -1028,6 +1017,9 @@ class PlanActVerifyAgent:
                 content, old_text, new_text, file_rel,
             )
             if corrected_old in content:
+                corrected_new = self._align_indentation(
+                    corrected_old, corrected_new,
+                )
                 content = content.replace(corrected_old, corrected_new, 1)
                 path.write_text(content, encoding="utf-8")
                 return f"Edited {file_rel} (LLM re-plan, backup at {backup.name})"
@@ -1035,6 +1027,10 @@ class PlanActVerifyAgent:
             match_pos = self._fuzzy_find(content, corrected_old)
             if match_pos is not None:
                 start, end = match_pos
+                matched_block = content[start:end]
+                corrected_new = self._align_indentation(
+                    matched_block, corrected_new,
+                )
                 content = content[:start] + corrected_new + content[end:]
                 path.write_text(content, encoding="utf-8")
                 return f"Edited {file_rel} (LLM re-plan + fuzzy, backup at {backup.name})"
@@ -1098,6 +1094,32 @@ class PlanActVerifyAgent:
             best_ratio, start_line, end_line,
         )
         return start_pos, end_pos
+
+    @staticmethod
+    def _align_indentation(matched_text: str, new_text: str) -> str:
+        """Ensure *new_text* has the same base indentation as *matched_text*.
+
+        LLMs often indent the first replacement line correctly but leave
+        subsequent lines at column 0.  This computes the indentation delta
+        between the first line of *matched_text* and *new_text*, then
+        prepends it to every non-empty line.
+        """
+        import re as _re
+
+        if "\n" not in new_text:
+            return new_text
+
+        target_indent = _re.match(r"(\s*)", matched_text).group(1)
+        actual_indent = _re.match(r"(\s*)", new_text).group(1)
+
+        if len(actual_indent) >= len(target_indent):
+            return new_text  # already has enough indentation
+
+        delta = target_indent[len(actual_indent):]
+        lines = new_text.split("\n")
+        return "\n".join(
+            delta + line if line.strip() else line for line in lines
+        )
 
     async def _replan_edit(
         self, file_content: str, old_text: str, new_text: str, file_rel: str,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from codator.core.agent_loop import (
+    PlanActVerifyAgent,
     _unescape_collapsed_code,
     _escape_broken_strings,
     normalize_edit_text,
@@ -214,3 +215,67 @@ class TestNormalizeEditText:
         text = "import re\\nx = '\n'.join(y)"
         result = normalize_edit_text(text)
         assert result == "import re\nx = '\\n'.join(y)"
+
+
+class TestAlignIndentation:
+    """Verify _align_indentation fixes LLM indentation issues."""
+
+    _align = staticmethod(PlanActVerifyAgent._align_indentation)
+
+    def test_no_change_when_already_correct(self):
+        matched = "            vtt = old_code"
+        new = "            vtt = new_code\n            print('done')"
+        assert self._align(matched, new) == new
+
+    def test_add_missing_indentation(self):
+        """LLM omits all indentation — add from matched text."""
+        matched = "            vtt = old_code"
+        new = "import re\nvtt = new_code"
+        expected = "            import re\n            vtt = new_code"
+        assert self._align(matched, new) == expected
+
+    def test_first_line_correct_subsequent_missing(self):
+        """LLM indents first line but not subsequent lines."""
+        matched = "            vtt = old_code"
+        new = "            import re\nvtt = new_code"
+        # First line has 12 spaces, matched has 12 → delta = 0 → no change
+        # This is the tricky case — first line is correct but rest aren't
+        assert self._align(matched, new) == new  # delta is 0
+
+    def test_preserves_relative_indentation(self):
+        """Relative indentation within new_text is preserved."""
+        matched = "        x = old"
+        new = "if condition:\n    x = new\nelse:\n    x = fallback"
+        expected = (
+            "        if condition:\n"
+            "            x = new\n"
+            "        else:\n"
+            "            x = fallback"
+        )
+        assert self._align(matched, new) == expected
+
+    def test_single_line_unchanged(self):
+        """Single-line replacement needs no indentation fix."""
+        matched = "            old_code"
+        new = "new_code"
+        assert self._align(matched, new) == "new_code"
+
+    def test_empty_lines_not_indented(self):
+        """Blank lines in new_text should stay blank."""
+        matched = "        x = 1"
+        new = "x = 1\n\ny = 2"
+        expected = "        x = 1\n\n        y = 2"
+        assert self._align(matched, new) == expected
+
+    def test_partial_indent_delta(self):
+        """LLM provides partial indentation — add the delta."""
+        matched = "            vtt = old"  # 12 spaces
+        new = "    import re\n    vtt = new"  # 4 spaces
+        expected = "            import re\n            vtt = new"  # 12 spaces
+        assert self._align(matched, new) == expected
+
+    def test_no_indent_needed(self):
+        """Matched text has no indentation — no changes."""
+        matched = "x = old"
+        new = "import re\nx = new"
+        assert self._align(matched, new) == new
