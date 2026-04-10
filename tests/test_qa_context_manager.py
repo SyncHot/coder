@@ -51,6 +51,15 @@ def _make_mgr(
     )
 
 
+def _mock_summary_backend(summary_text="Summary of discussion."):
+    """Create a mock backend that returns a short summary."""
+    backend = AsyncMock()
+    result = MagicMock()
+    result.text = summary_text
+    backend.generate = AsyncMock(return_value=result)
+    return backend
+
+
 # ===================================================================
 # 1. INFINITE COMPACTION LOOP PREVENTION
 # ===================================================================
@@ -61,7 +70,8 @@ class TestCompactionLoopPrevention:
     @pytest.mark.asyncio
     async def test_compaction_reduces_token_count(self):
         """After compaction, total tokens MUST decrease."""
-        mgr = _make_mgr(window=200, threshold=0.5)
+        backend = _mock_summary_backend("Discussed 20 questions about testing.")
+        mgr = _make_mgr(window=2000, threshold=0.5, summary_backend=backend)
         mgr.add_message(_msg(Role.SYSTEM, "You are codator."))
         for i in range(20):
             mgr.add_message(_msg(Role.USER, f"Question {i}: " + "x" * 80))
@@ -78,7 +88,8 @@ class TestCompactionLoopPrevention:
     @pytest.mark.asyncio
     async def test_double_compaction_stable(self):
         """Two compactions in a row should not cause errors or grow context."""
-        mgr = _make_mgr(window=100, threshold=0.3)
+        backend = _mock_summary_backend("Short summary.")
+        mgr = _make_mgr(window=1000, threshold=0.3, summary_backend=backend)
         mgr.add_message(_msg(Role.SYSTEM, "sys"))
         for i in range(15):
             mgr.add_message(_msg(Role.USER, f"Q{i}" + "x" * 40))
@@ -86,7 +97,6 @@ class TestCompactionLoopPrevention:
 
         # First compaction
         await mgr.maybe_compact()
-        mgr.total_tokens()  # capture state after first compaction
 
         # Force context above threshold again
         for i in range(15):

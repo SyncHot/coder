@@ -227,6 +227,14 @@ class TreeSitterProjectIndexer(ProjectIndexer):
         for child in node.children:
             if child.type in ("identifier", "type_identifier", "property_identifier"):
                 return child.text.decode("utf-8", errors="replace")
+        # Handle import nodes: tree-sitter uses dotted_name / module_name
+        if node.type in ("import_statement", "import_from_statement"):
+            for child in node.children:
+                if child.type in ("dotted_name", "module_name"):
+                    return child.text.decode("utf-8", errors="replace")
+            # Fallback: extract the full import text as the name
+            text = node.text.decode("utf-8", errors="replace").split("\n")[0].strip()
+            return text[:80] if text else ""
         # For some node types the name is the first named child
         if node.named_children:
             first = node.named_children[0]

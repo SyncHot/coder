@@ -205,8 +205,8 @@ class TestAgentPathTraversal:
 
     @pytest.fixture
     def agent(self):
-        from codator.core.agent_loop import AgentLoop
-        return AgentLoop(
+        from codator.core.agent_loop import PlanActVerifyAgent
+        return PlanActVerifyAgent(
             model="test",
             ollama_base_url="http://localhost:11434",
             project_root="/tmp/test_project",

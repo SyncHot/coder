@@ -31,8 +31,8 @@ class TestAgentPlanParsing:
 
     @pytest.fixture
     def agent(self):
-        from codator.core.agent_loop import AgentLoop
-        return AgentLoop(
+        from codator.core.agent_loop import PlanActVerifyAgent
+        return PlanActVerifyAgent(
             model="test-model",
             ollama_base_url="http://localhost:11434",
             project_root="/tmp/test_project",
@@ -109,14 +109,14 @@ class TestAgentActionSafety:
 
     @pytest.fixture
     def agent(self):
-        from codator.core.agent_loop import AgentLoop
+        from codator.core.agent_loop import PlanActVerifyAgent
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create test files
             Path(tmpdir, "src").mkdir()
             Path(tmpdir, "src/main.py").write_text("def main():\n    return None\n")
             Path(tmpdir, "README.md").write_text("# Test Project\n")
 
-            yield AgentLoop(
+            yield PlanActVerifyAgent(
                 model="test-model",
                 ollama_base_url="http://localhost:11434",
                 project_root=tmpdir,
@@ -381,7 +381,7 @@ class TestE2EScenario:
     @pytest.mark.asyncio
     async def test_full_agent_workflow_mocked(self):
         """Simulate the complete agent workflow with mocks."""
-        from codator.core.agent_loop import AgentLoop, AgentStep
+        from codator.core.agent_loop import PlanActVerifyAgent, AgentStep
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Setup: create a project with a bug
@@ -395,7 +395,7 @@ class TestE2EScenario:
                 "    assert divide(10, 2) == 5\n"
             )
 
-            agent = AgentLoop(
+            agent = PlanActVerifyAgent(
                 model="test-model",
                 ollama_base_url="http://localhost:11434",
                 project_root=tmpdir,
@@ -443,7 +443,7 @@ class TestE2EScenario:
     @pytest.mark.asyncio
     async def test_agent_project_context_passed(self):
         """Verify project file tree is passed as context to plan."""
-        from codator.core.agent_loop import AgentLoop
+        from codator.core.agent_loop import PlanActVerifyAgent
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create multi-module project
@@ -453,7 +453,7 @@ class TestE2EScenario:
             Path(tmpdir, "frontend").mkdir()
             Path(tmpdir, "frontend/App.tsx").write_text("export default App;\n")
 
-            AgentLoop(
+            PlanActVerifyAgent(
                 model="test-model",
                 ollama_base_url="http://localhost:11434",
                 project_root=tmpdir,
