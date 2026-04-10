@@ -297,6 +297,24 @@ Guidelines:
 - Respond in the same language as the user's question.
 """
 
+_REPLAN_EDIT_SYSTEM = """\
+You are a precise code editor. You will be given:
+1. The ACTUAL content of a source file.
+2. An INTENDED edit (old/new text that failed to match).
+
+Your job: find the correct text span in the actual file that corresponds
+to the intended "old" text, then return the corrected edit as JSON:
+{"old": "<exact text from the file to replace>", "new": "<replacement text>"}
+
+RULES:
+- The "old" field MUST be copied character-for-character from the actual file
+  content — including indentation, whitespace, and blank lines.
+- The "new" field should achieve the same intent as the original replacement.
+- Return ONLY the JSON object, no markdown fences or explanation.
+- If the intended edit does not correspond to any part of the file, return:
+  {"old": "", "new": "", "error": "no matching code found"}
+"""
+
 _IMPLEMENT_SYSTEM = """\
 Coding assistant — implements specific changes.
 Given one or more proposals to implement, produce
@@ -753,6 +771,29 @@ class PlanActVerifyAgent:
             path.write_text(content, encoding="utf-8")
             return f"Edited {file_rel} (fuzzy match, backup at {backup.name})"
 
+        # 3. LLM-assisted re-plan: ask the model to find the correct span
+        logger.warning(
+            "Exact and fuzzy match failed for %s — attempting LLM re-plan",
+            file_rel,
+        )
+        try:
+            corrected_old, corrected_new = await self._replan_edit(
+                content, old_text, new_text, file_rel,
+            )
+            if corrected_old in content:
+                content = content.replace(corrected_old, corrected_new, 1)
+                path.write_text(content, encoding="utf-8")
+                return f"Edited {file_rel} (LLM re-plan, backup at {backup.name})"
+            # Corrected old still doesn't match — try fuzzy on the correction
+            match_pos = self._fuzzy_find(content, corrected_old)
+            if match_pos is not None:
+                start, end = match_pos
+                content = content[:start] + corrected_new + content[end:]
+                path.write_text(content, encoding="utf-8")
+                return f"Edited {file_rel} (LLM re-plan + fuzzy, backup at {backup.name})"
+        except Exception as replan_exc:
+            logger.warning("LLM re-plan failed for %s: %s", file_rel, replan_exc)
+
         raise ValueError(
             f"Text to replace not found in {file_rel} (neither exact nor fuzzy)"
         )
@@ -810,6 +851,42 @@ class PlanActVerifyAgent:
             best_ratio, start_line, end_line,
         )
         return start_pos, end_pos
+
+    async def _replan_edit(
+        self, file_content: str, old_text: str, new_text: str, file_rel: str,
+    ) -> tuple[str, str]:
+        """Ask the LLM to correct an edit using actual file content.
+
+        Returns (corrected_old, corrected_new).
+        Raises ValueError if the LLM cannot find a match.
+        """
+        # Truncate very large files to stay within context
+        max_chars = self._num_ctx * 3  # rough chars-to-tokens ratio
+        truncated = file_content[:max_chars]
+
+        user_msg = (
+            f"FILE: {file_rel}\n"
+            f"```\n{truncated}\n```\n\n"
+            f"INTENDED EDIT (old text did NOT match the file):\n"
+            f"old: ```\n{old_text}\n```\n"
+            f"new: ```\n{new_text}\n```\n\n"
+            f"Find the correct span in the actual file and return corrected JSON."
+        )
+
+        logger.info("Re-planning edit for %s via LLM", file_rel)
+        raw = await self._ollama_chat(_REPLAN_EDIT_SYSTEM, user_msg)
+        corrected = safe_parse_json(raw)
+
+        corrected_old = corrected.get("old", "")
+        corrected_new = corrected.get("new", "")
+        error = corrected.get("error", "")
+
+        if error or not corrected_old:
+            raise ValueError(
+                f"LLM re-plan could not find matching code in {file_rel}: {error}"
+            )
+
+        return corrected_old, corrected_new
 
     async def _act_create_file(self, step: AgentStep) -> str:
         path = self._safe_path(step.target)

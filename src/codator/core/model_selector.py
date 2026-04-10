@@ -11,6 +11,8 @@ import logging
 import re
 from dataclasses import dataclass
 
+from codator.core.model_catalog import CATALOG
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -137,27 +139,29 @@ class ModelSelector:
         "qwen2.5-coder:14b-instruct-q6_K",
         "qwen2.5-coder:32b-instruct-q3_K_M",
         "deepseek-r1:32b",
+        "qwq:32b",
+        "qwen3:32b",
+        "devstral",
     ]
 
-    # Known VRAM requirements (MiB) — measured/estimated with Ollama
+    # Known VRAM requirements (MiB) — populated from model_catalog + overrides
     _VRAM_MAP: dict[str, int] = {
-        "qwen2.5-coder:1.5b": 1_200,
-        "qwen2.5-coder:7b": 5_500,
-        "qwen2.5-coder:14b-instruct-q6_K": 12_500,
-        "qwen2.5-coder:32b-instruct-q3_K_M": 15_800,
-        "deepseek-r1:32b": 19_000,
-        "deepseek-coder:latest": 1_000,
+        entry.ollama_tag: entry.vram_mb
+        for entry in CATALOG
+        if entry.vram_mb > 0
     }
+    # Extra entries not in catalog (e.g. legacy tags)
+    _VRAM_MAP.setdefault("deepseek-coder:latest", 1_000)
 
-    # Maximum context each model can handle (tokens)
+    # Maximum context each model can handle (tokens) — from catalog
     _MAX_CTX: dict[str, int] = {
-        "qwen2.5-coder:1.5b": 32_768,
-        "qwen2.5-coder:7b": 32_768,
-        "qwen2.5-coder:14b-instruct-q6_K": 32_768,
-        "qwen2.5-coder:32b-instruct-q3_K_M": 32_768,
-        "deepseek-r1:32b": 131_072,
-        "deepseek-coder:latest": 16_384,
+        entry.ollama_tag: entry.context_max
+        for entry in CATALOG
     }
+    _MAX_CTX.setdefault("deepseek-coder:latest", 16_384)
+
+    # Regex to extract parameter count from Ollama tag (e.g. "qwq:32b" → 32)
+    _PARAM_RE: re.Pattern[str] = re.compile(r"(\d+(?:\.\d+)?)b", re.IGNORECASE)
 
     # Context-window ranges per complexity tier
     _CTX_RANGES: dict[str, tuple[int, int]] = {
@@ -213,11 +217,23 @@ class ModelSelector:
     def estimate_vram_mb(model_name: str) -> int:
         """Return estimated VRAM usage in MiB for *model_name*.
 
-        Falls back to a conservative heuristic when the model is unknown.
+        Falls back to a heuristic based on parameter count parsed from the
+        model tag (e.g. ``"qwq:32b"`` → ~20 GiB).  If even that fails,
+        uses a conservative 2 048 MiB fallback.
         """
         if model_name in ModelSelector._VRAM_MAP:
             return ModelSelector._VRAM_MAP[model_name]
-        # Heuristic: assume ~1 GB per billion parameters (rough upper bound)
+
+        # Heuristic: ~0.6 GiB per billion parameters (Q4_K_M quant average)
+        m = ModelSelector._PARAM_RE.search(model_name)
+        if m:
+            params_b = float(m.group(1))
+            estimated = int(params_b * 625)  # 0.625 GiB/B → MiB
+            logger.info(
+                "VRAM estimate for %r: %d MiB (from %.1fB params)", model_name, estimated, params_b,
+            )
+            return estimated
+
         logger.warning("No VRAM estimate for %r — using 2 048 MiB fallback", model_name)
         return 2_048
 
