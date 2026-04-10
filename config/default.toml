@@ -109,3 +109,8 @@ dangerous_patterns = [
     'reboot',
     'init\s+0',
 ]
+
+[ollama]
+# Ollama local inference
+base_url = "http://localhost:11434"
+model = "qwen2.5-coder:14b-instruct-q6_K"

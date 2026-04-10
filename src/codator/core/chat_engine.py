@@ -22,6 +22,7 @@ from codator.domain.models import (
 )
 from codator.infrastructure.api_clients import ClaudeBackend, OpenAIBackend
 from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
+from codator.infrastructure.ollama_backend import OllamaBackend
 from codator.infrastructure.tools.browser_tool import BrowserTool
 from codator.infrastructure.tools.ssh_tool import SSHTool
 from codator.infrastructure.tools.terminal_tool import TerminalTool
@@ -106,6 +107,9 @@ class ChatEngine:
         elif provider == "openai" and self._settings.api.openai_api_key:
             self._backend = OpenAIBackend(self._settings)
             self._active_model = self._settings.api.openai_model
+        elif provider == "ollama":
+            self._backend = OllamaBackend(self._settings)
+            self._active_model = self._settings.ollama.model
 
     def _register_tools(self):
         """Register SSH, Browser, and Terminal tools from settings."""
@@ -222,9 +226,19 @@ class ChatEngine:
         elif provider == "openai":
             self._backend = OpenAIBackend(self._settings)
             self._active_model = self._settings.api.openai_model
+        elif provider == "ollama":
+            self._backend = OllamaBackend(self._settings)
+            self._active_model = self._settings.ollama.model
         else:
             return f"Unknown provider: {provider}"
         return f"Switched to API: {self._active_model}"
+
+    async def switch_ollama_model(self, model: str) -> str:
+        """Switch to a specific Ollama model."""
+        await self._backend.close()
+        self._backend = OllamaBackend(self._settings, model=model)
+        self._active_model = model
+        return f"Switched to Ollama model: {model}"
 
     # ----- State -----
 

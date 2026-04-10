@@ -42,8 +42,8 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
                 print_info(result)
 
         case "/api":
-            if arg not in ("claude", "openai"):
-                print_error("Usage: /api <claude|openai>")
+            if arg not in ("claude", "openai", "ollama"):
+                print_error("Usage: /api <claude|openai|ollama>")
             else:
                 result = await engine.switch_to_api(arg)
                 print_info(result)
@@ -90,6 +90,9 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
 
         case "/terminal" | "/term" | "/shell":
             await _handle_terminal(arg, engine)
+
+        case "/ollama":
+            await _handle_ollama(arg, engine)
 
         case _:
             print_error(f"Unknown command: {command}. Type /help for available commands.")
@@ -225,3 +228,47 @@ async def _handle_terminal(arg: str, engine: ChatEngine) -> None:
     call = ToolCall(tool_name="terminal", parameters={"command": arg.strip()})
     result = await engine.execute_tool(call)
     print_tool_result(result)
+
+
+async def _handle_ollama(arg: str, engine: ChatEngine) -> None:
+    """Handle /ollama [list|use <model>]."""
+    from codator.infrastructure.ollama_backend import OllamaBackend
+
+    parts = arg.strip().split(maxsplit=1)
+    action = parts[0] if parts else "list"
+    rest = parts[1] if len(parts) > 1 else ""
+
+    match action:
+        case "list" | "ls" | "":
+            print_info("Fetching models from Ollama...")
+            backend = OllamaBackend(engine._settings)
+            models = await backend.list_models()
+            await backend.close()
+            if not models:
+                print_error("No models found. Is Ollama running?")
+                return
+            from rich.table import Table
+            table = Table(title="Ollama Models", border_style="cyan")
+            table.add_column("Name", style="bold")
+            table.add_column("Size")
+            table.add_column("Modified")
+            for m in models:
+                name = m.get("name", "?")
+                size_bytes = m.get("size", 0)
+                size_gb = f"{size_bytes / 1_073_741_824:.1f} GB"
+                modified = m.get("modified_at", "?")[:10]
+                active = " ← active" if name == engine.active_model else ""
+                table.add_row(f"{name}{active}", size_gb, modified)
+            console.print(table)
+
+        case "use" | "switch":
+            if not rest:
+                print_error("Usage: /ollama use <model-name>")
+                return
+            result = await engine.switch_ollama_model(rest)
+            print_info(result)
+
+        case _:
+            # Treat as model name shortcut: /ollama qwen2.5-coder:14b
+            result = await engine.switch_ollama_model(action)
+            print_info(result)

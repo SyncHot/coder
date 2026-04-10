@@ -98,6 +98,11 @@ class TerminalConfig(BaseModel):
     ])
 
 
+class OllamaConfig(BaseModel):
+    base_url: str = "http://localhost:11434"
+    model: str = "qwen2.5-coder:14b-instruct-q6_K"
+
+
 class AppSettings(BaseSettings):
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
@@ -107,6 +112,7 @@ class AppSettings(BaseSettings):
     ssh: SSHConfig = Field(default_factory=SSHConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     terminal: TerminalConfig = Field(default_factory=TerminalConfig)
+    ollama: OllamaConfig = Field(default_factory=OllamaConfig)
 
 
 # ---------------------------------------------------------------------------

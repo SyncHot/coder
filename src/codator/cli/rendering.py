@@ -99,7 +99,7 @@ def print_help():
 | `/help` | Show this help |
 | `/quit` or `/exit` | Exit codator |
 | `/model <path>` | Load a local GGUF model |
-| `/api <claude\\|openai>` | Switch to cloud API |
+| `/api <claude\\|openai\\|ollama>` | Switch to cloud/local API |
 | `/context` | Show context usage |
 | `/clear` | Clear conversation |
 | `/hardware` | Show GPU/hardware info |
@@ -109,6 +109,7 @@ def print_help():
 | `/ssh <action>` | SSH tool (connect/exec/upload/download/close) |
 | `/browser <action>` | Browser tool (launch/navigate/click/screenshot/close) |
 | `/terminal <cmd>` | Run a local shell command (sandboxed) |
+| `/ollama [list\\|use <model>]` | List/switch Ollama models |
 """
     console.print(Markdown(help_text))
 
