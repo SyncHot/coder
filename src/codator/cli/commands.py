@@ -409,21 +409,47 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
     # --- Helpers ---
 
     def on_step(description: str, status: str) -> None:
+        """Show progress in natural language, not machine format."""
         icon = {"started": "🔄", "running": "⏳", "done": "✅", "failed": "❌"}.get(
             status, "•"
         )
-        console.print(f"  {icon} {description}")
+        # Clean up machine-like descriptions
+        msg = description
+        # Don't display raw JSON edit descriptions
+        if msg.startswith('{') or msg.startswith('{"'):
+            msg = "Applying code change…"
+        # Shorten overly long descriptions
+        if len(msg) > 120:
+            msg = msg[:117] + "…"
+        console.print(f"  {icon} {msg}")
 
     # Track whether we're showing thinking vs summary
     _thinking_phase = {"active": False, "label": "", "has_output": False}
 
     def on_token(token: str) -> None:
-        """Print model tokens in real-time — dimmed for thinking."""
+        """Print model tokens in real-time — dimmed for thinking.
+
+        Suppresses raw JSON output (internal plan/step data) so the user
+        only sees natural-language thinking from the model.
+        """
         if _thinking_phase.get("active"):
+            # Buffer tokens and detect JSON structures to suppress
+            buf = _thinking_phase.get("_buf", "")
+            buf += token
+            _thinking_phase["_buf"] = buf
+
+            # If it looks like JSON is starting, hold off on printing
+            stripped = buf.lstrip()
+            if stripped and stripped[0] in ('{', '['):
+                # Accumulating JSON — don't print until we know it's not JSON
+                return
+            # If we were buffering potential JSON but got natural text, flush
             if not _thinking_phase.get("has_output"):
                 console.print("[dim italic]  💭 thinking…[/dim italic]")
                 _thinking_phase["has_output"] = True
+            # Print only non-JSON content
             console.print(f"[dim]{token}[/dim]", end="", highlight=False)
+            _thinking_phase["_buf"] = ""
 
     def _start_thinking(label: str = "thinking") -> None:
         _thinking_phase["active"] = True
@@ -434,6 +460,7 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
         if _thinking_phase.get("has_output"):
             console.print()  # newline after streamed tokens
         _thinking_phase["active"] = False
+        _thinking_phase["_buf"] = ""
 
     # --- Build project context ---
 
