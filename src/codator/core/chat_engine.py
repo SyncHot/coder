@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -229,7 +231,7 @@ class ChatEngine:
         """Agentic loop: generate → detect tool calls → execute → re-generate."""
         tools_defs = self._tools.to_openai_tools()
 
-        for iteration in range(MAX_TOOL_ITERATIONS):
+        for _iteration in range(MAX_TOOL_ITERATIONS):
             # Non-streaming call with tool support
             result = await self._backend.generate(
                 self._context.get_messages(),
@@ -238,7 +240,12 @@ class ChatEngine:
                 tools=tools_defs,
             )
 
-            if not result.tool_calls:
+            # Check for native tool calls first, then text-based fallback
+            tool_calls = result.tool_calls
+            if not tool_calls and result.text:
+                tool_calls = self._parse_text_tool_calls(result.text)
+
+            if not tool_calls:
                 # Final text response — yield it
                 if result.text:
                     yield result.text
@@ -250,28 +257,15 @@ class ChatEngine:
                 self._context.add_message(assistant_msg)
                 return
 
-            # Model wants to call tools — process them
-            # Store assistant message with tool_calls metadata
-            raw_tool_calls = []
-            for tc in result.tool_calls:
-                raw_tool_calls.append({
-                    "id": tc.call_id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.tool_name,
-                        "arguments": __import__("json").dumps(tc.parameters),
-                    },
-                })
-
+            # Model wants to call tools — store assistant message
             assistant_msg = Message(
                 role=Role.ASSISTANT,
                 content=result.text or "",
-                metadata={"tool_calls": raw_tool_calls},
             )
             self._context.add_message(assistant_msg)
 
-            # Execute each tool and add results
-            for tc in result.tool_calls:
+            # Execute each tool and add results as user messages
+            for tc in tool_calls:
                 yield f"\n🔧 **{tc.tool_name}**"
                 params_str = ", ".join(f"{k}={v!r}" for k, v in tc.parameters.items())
                 yield f"({params_str})...\n"
@@ -279,7 +273,6 @@ class ChatEngine:
                 tool_result = await self._tools.execute(tc)
 
                 if tool_result.success:
-                    # Truncate long outputs for display
                     display = tool_result.output
                     if len(display) > 500:
                         display = display[:500] + "\n... [truncated]"
@@ -287,16 +280,65 @@ class ChatEngine:
                 else:
                     yield f"❌ {tool_result.error}\n\n"
 
-                # Add tool result message to context
+                # Add tool result as user message (works with all models)
+                result_text = tool_result.output or tool_result.error
+                if len(result_text) > 8000:
+                    result_text = result_text[:8000] + "\n... [truncated]"
                 tool_msg = Message(
-                    role=Role.TOOL,
-                    content=tool_result.output or tool_result.error,
-                    metadata={"tool_call_id": tc.call_id},
+                    role=Role.USER,
+                    content=f"[Tool result for {tc.tool_name}]:\n{result_text}",
                 )
                 self._context.add_message(tool_msg)
 
         # Safety: if we hit max iterations
         yield "\n⚠️ Reached maximum tool iterations.\n"
+
+    @staticmethod
+    def _parse_text_tool_calls(text: str) -> list[ToolCall]:
+        """Parse tool calls from model text output (fallback for non-native tool calling).
+
+        Handles patterns like:
+          {"name": "read_file", "arguments": {"path": "src/main.py"}}
+          <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+        """
+        calls: list[ToolCall] = []
+
+        # Try to find JSON objects with "name" and "arguments" keys
+        # Match standalone JSON objects
+        json_pattern = re.compile(
+            r'\{[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*"arguments"\s*:\s*(\{[^{}]*\})[^{}]*\}',
+            re.DOTALL,
+        )
+        for match in json_pattern.finditer(text):
+            try:
+                name = match.group(1)
+                args = json.loads(match.group(2))
+                calls.append(ToolCall(
+                    tool_name=name,
+                    parameters=args,
+                    call_id=f"text_{name}",
+                ))
+            except (json.JSONDecodeError, IndexError):
+                continue
+
+        if calls:
+            return calls
+
+        # Try parsing the entire text as a JSON tool call
+        stripped = text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                data = json.loads(stripped)
+                if "name" in data and "arguments" in data:
+                    calls.append(ToolCall(
+                        tool_name=data["name"],
+                        parameters=data.get("arguments", {}),
+                        call_id=f"text_{data['name']}",
+                    ))
+            except json.JSONDecodeError:
+                pass
+
+        return calls
 
     # ----- Model management -----
 
