@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -58,6 +59,11 @@ def create_app(engine: ChatEngine) -> FastAPI:
 def _register_routes(app: FastAPI):
 
     @app.get("/", response_class=HTMLResponse)
+    async def chat_ui():
+        """Claude-like chat interface — the main UI."""
+        return (Path(__file__).parent / "static" / "chat.html").read_text()
+
+    @app.get("/dashboard", response_class=HTMLResponse)
     async def dashboard():
         return (Path(__file__).parent / "static" / "index.html").read_text()
 
@@ -427,3 +433,128 @@ def _register_routes(app: FastAPI):
                 ],
             }
         return {"results": []}
+
+    @app.post("/api/agent/stream")
+    async def agent_stream(request: Request):
+        """SSE streaming agent endpoint — streams events during Plan-Act-Verify."""
+        import json as json_mod
+
+        from codator.core.agent_loop import PlanActVerifyAgent
+
+        data = await request.json()
+        task = data.get("task", "")
+        if not task:
+            return JSONResponse({"error": "task required"}, status_code=400)
+
+        ollama_cfg = _engine._settings.ollama
+        agent = PlanActVerifyAgent(
+            ollama_base_url=ollama_cfg.base_url,
+            model=_engine.active_model or ollama_cfg.model,
+            project_root=_engine._project_root,
+            num_ctx=_engine._settings.inference.context_size,
+        )
+
+        async def event_generator():
+            events: asyncio.Queue = asyncio.Queue()
+
+            def on_step(description: str, status: str):
+                events.put_nowait(json_mod.dumps({
+                    "type": "step", "description": description, "status": status,
+                }))
+
+            def on_token(token: str):
+                events.put_nowait(json_mod.dumps({
+                    "type": "token", "token": token,
+                }))
+
+            async def run_agent():
+                try:
+                    # Build context
+                    project_context = ""
+                    try:
+                        root = Path(_engine._project_root).resolve()
+                        code_exts = {".py", ".js", ".ts", ".go", ".rs", ".java"}
+                        files = []
+                        for f in sorted(root.rglob("*")):
+                            if f.is_file() and f.suffix in code_exts:
+                                rel = f.relative_to(root)
+                                parts = rel.parts
+                                if any(p.startswith(".") or p in (
+                                    "__pycache__", "node_modules", ".venv", "venv",
+                                ) for p in parts):
+                                    continue
+                                files.append(str(rel))
+                        if files:
+                            project_context = (
+                                "Project file tree:\n" + "\n".join(files[:200])
+                            )
+                    except Exception:
+                        pass
+
+                    proposals, _ = await agent.analyze_and_propose(
+                        task,
+                        project_context=project_context,
+                        on_step=on_step,
+                        on_token=on_token,
+                    )
+
+                    if proposals:
+                        events.put_nowait(json_mod.dumps({
+                            "type": "proposals",
+                            "proposals": [
+                                {
+                                    "index": p.index,
+                                    "title": p.title,
+                                    "description": p.description,
+                                    "file": p.file,
+                                    "priority": p.priority,
+                                }
+                                for p in proposals
+                            ],
+                        }))
+
+                    # Auto-implement all proposals
+                    result = await agent.implement_proposals(
+                        proposals,
+                        task=task,
+                        project_context=project_context,
+                        on_step=on_step,
+                        on_token=on_token,
+                    )
+
+                    events.put_nowait(json_mod.dumps({
+                        "type": "result",
+                        "final_success": result.final_success,
+                        "heal_iterations": result.heal_iterations,
+                        "steps_executed": len(result.actions),
+                        "errors": result.verification.errors[:5],
+                        "warnings": result.verification.warnings[:5],
+                    }))
+                except Exception as exc:
+                    events.put_nowait(json_mod.dumps({
+                        "type": "error", "error": str(exc),
+                    }))
+                finally:
+                    events.put_nowait(None)  # sentinel
+
+            agent_task = asyncio.create_task(run_agent())
+
+            try:
+                while True:
+                    event = await events.get()
+                    if event is None:
+                        yield "data: [DONE]\n\n"
+                        break
+                    yield f"data: {event}\n\n"
+            except asyncio.CancelledError:
+                agent_task.cancel()
+                raise
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )

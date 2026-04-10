@@ -26,7 +26,7 @@ KEEP_TOOL_MESSAGES = 4
 
 # Template for the summary generation prompt
 SUMMARY_PROMPT = """\
-You are a technical context summarizer. Summarize the following conversation \
+Technical context summarizer. Summarize the following conversation \
 between a developer and an AI coding assistant. Preserve:
 - All code snippets, file paths, function/class names mentioned
 - Key decisions made and their rationale

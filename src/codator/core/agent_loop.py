@@ -204,7 +204,7 @@ class Proposal:
 # ---------------------------------------------------------------------------
 
 _PLAN_SYSTEM = """\
-You are a coding assistant that produces structured plans.
+Coding assistant — produces structured plans.
 Given a task and optional project context, return a JSON object with:
 {
   "task": "<restate the task concisely>",
@@ -245,7 +245,7 @@ Rules:
 """
 
 _HEAL_SYSTEM = """\
-You are a coding assistant that fixes errors.
+Coding assistant — fixes errors.
 Given the original task, the errors encountered, and optional project context,
 produce a new JSON plan to fix the errors.
 
@@ -270,9 +270,9 @@ CRITICAL RULES:
 """
 
 _PROPOSE_SYSTEM = """\
-You are a senior code reviewer and programming partner. After analyzing the code, \
-produce a list of concrete improvement proposals. Write each proposal as if you \
-were explaining it to a colleague — natural language, not robotic bullet points.
+Senior code reviewer and programming partner. After analyzing the code, \
+produce a list of concrete improvement proposals. Write each proposal as if \
+explaining it to a colleague — natural language, not robotic bullet points.
 
 Return JSON:
 {
@@ -298,8 +298,8 @@ Guidelines:
 """
 
 _IMPLEMENT_SYSTEM = """\
-You are a coding assistant that implements specific changes.
-You are given one or more proposals to implement. For each proposal, produce
+Coding assistant — implements specific changes.
+Given one or more proposals to implement, produce
 the necessary plan steps (read_file first, then edit_file).
 
 You also have read-only grep and glob actions to find code before editing:
@@ -1462,7 +1462,7 @@ class PlanActVerifyAgent:
                 )
                 try:
                     summary = await self._ollama_chat(
-                        "You are a helpful coding assistant. Provide a clear, "
+                        "Helpful coding assistant. Provide a clear, "
                         "actionable review of the code. Be specific about what "
                         "is good and what should be improved. "
                         "Respond in the same language as the user's question.",

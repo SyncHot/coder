@@ -558,7 +558,7 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
                 from codator.core.agent_loop import PlanActVerifyAgent
 
                 answer_raw = await agent._ollama_chat(
-                    "You are a helpful code assistant. Answer questions about the "
+                    "Helpful code assistant. Answer questions about the "
                     "analysis and proposals you generated. Be concise and specific.",
                     answer_prompt,
                     force_json=False,
