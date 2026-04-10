@@ -125,6 +125,8 @@ class ChatEngine:
         self._message_count: int = 0
         self._system_refresh_interval: int = 10
         self._manual_model_override: bool = False
+        self._web_server: Any | None = None
+        self._web_task: Any | None = None
 
     # ----- Lifecycle -----
 
@@ -625,6 +627,38 @@ class ChatEngine:
     @property
     def contextual_index(self) -> ContextualIndex | None:
         return self._contextual_index
+
+    async def start_web(self) -> str:
+        """Start the web dashboard in the background. Returns status message."""
+        import asyncio
+
+        import uvicorn
+
+        from codator.web.app import create_app
+
+        # Stop existing server if running
+        if self._web_server is not None:
+            self._web_server.should_exit = True
+            if self._web_task and not self._web_task.done():
+                try:
+                    await asyncio.wait_for(self._web_task, timeout=3)
+                except asyncio.TimeoutError:
+                    self._web_task.cancel()
+            self._web_server = None
+            self._web_task = None
+
+        app = create_app(self)
+        web_cfg = self._settings.web
+        config = uvicorn.Config(
+            app, host=web_cfg.host, port=web_cfg.port, log_level="warning",
+        )
+        self._web_server = uvicorn.Server(config)
+        self._web_task = asyncio.create_task(self._web_server.serve())
+        return f"Web dashboard: http://{web_cfg.host}:{web_cfg.port}"
+
+    async def restart_web(self) -> str:
+        """Restart the web dashboard."""
+        return await self.start_web()
 
     def set_confirm_callback(self, cb: ConfirmCallback | None) -> None:
         """Set the human-in-the-loop confirmation callback for write/edit tools."""

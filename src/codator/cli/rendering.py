@@ -236,6 +236,7 @@ def print_help():
 | `/index` | Re-index project |
 | `/git` | Show git work context |
 | `/web` | Start web dashboard |
+| `/restart` | Restart web dashboard |
 | `/ssh <action>` | SSH tool (connect/exec/upload/download/close) |
 | `/browser <action>` | Browser tool (launch/navigate/click/screenshot/close) |
 | `/terminal <cmd>` | Run a local shell command (sandboxed) |

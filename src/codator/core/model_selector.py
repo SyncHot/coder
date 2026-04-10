@@ -136,6 +136,7 @@ class ModelSelector:
     COMPLEX_MODELS: list[str] = [
         "qwen2.5-coder:14b-instruct-q6_K",
         "qwen2.5-coder:32b-instruct-q3_K_M",
+        "deepseek-r1:32b",
     ]
 
     # Known VRAM requirements (MiB) — measured/estimated with Ollama
@@ -144,6 +145,7 @@ class ModelSelector:
         "qwen2.5-coder:7b": 5_500,
         "qwen2.5-coder:14b-instruct-q6_K": 12_500,
         "qwen2.5-coder:32b-instruct-q3_K_M": 15_800,
+        "deepseek-r1:32b": 19_000,
         "deepseek-coder:latest": 1_000,
     }
 
@@ -153,6 +155,7 @@ class ModelSelector:
         "qwen2.5-coder:7b": 32_768,
         "qwen2.5-coder:14b-instruct-q6_K": 32_768,
         "qwen2.5-coder:32b-instruct-q3_K_M": 32_768,
+        "deepseek-r1:32b": 131_072,
         "deepseek-coder:latest": 16_384,
     }
 

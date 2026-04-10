@@ -153,6 +153,16 @@ class AMDHardwareProbe(HardwareProbe):
                 description=f"Hybrid mode: {gpu_layers} layers on GPU, rest on DDR5",
                 ollama_tag="deepseek-coder:33b-instruct-q4_K_M",
             ))
+            recs.append(ModelRecommendation(
+                name="DeepSeek-R1-Distill-Qwen-32B",
+                params="32B",
+                quant="Q4_K_M",
+                mode=InferenceMode.HYBRID,
+                n_gpu_layers=gpu_layers,
+                estimated_vram_mb=vram - 1_000,
+                description="Reasoning model (R1 distilled), hybrid GPU/CPU",
+                ollama_tag="deepseek-r1:32b",
+            ))
 
         return recs
 

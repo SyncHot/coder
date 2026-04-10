@@ -30,7 +30,7 @@ logger = logging.getLogger("codator")
 # Slash-command auto-completion
 COMMANDS = [
     "/help", "/quit", "/exit", "/model", "/api", "/context",
-    "/clear", "/hardware", "/index", "/git", "/web",
+    "/clear", "/hardware", "/index", "/git", "/web", "/restart",
     "/ssh", "/browser", "/terminal", "/ollama",
     "/agent", "/gpu", "/memory", "/mcp",
     "/save", "/load", "/history", "/undo",
@@ -109,15 +109,8 @@ async def async_main():
 
     # Web dashboard (background)
     if args.web:
-        import uvicorn
-
-        from codator.web.app import create_app
-        app = create_app(engine)
-        web_cfg = engine._settings.web
-        uv_config = uvicorn.Config(app, host=web_cfg.host, port=web_cfg.port, log_level="warning")
-        server = uvicorn.Server(uv_config)
-        asyncio.create_task(server.serve())
-        print_info(f"Web dashboard: http://{web_cfg.host}:{web_cfg.port}")
+        result = await engine.start_web()
+        print_info(result)
 
     # Dynamic bottom toolbar callable
     def _toolbar():
