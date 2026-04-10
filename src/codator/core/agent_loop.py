@@ -6,9 +6,9 @@ import asyncio
 import json
 import logging
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable
 
 import httpx
 
