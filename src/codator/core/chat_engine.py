@@ -12,7 +12,14 @@ from codator.core.git_integration import GitContext
 from codator.core.project_indexer import TreeSitterProjectIndexer
 from codator.core.tool_registry import ToolRegistry
 from codator.domain.interfaces import InferenceBackend
-from codator.domain.models import GenerationResult, Message, ProjectMap, Role, ToolCall
+from codator.domain.models import (
+    GenerationResult,
+    Message,
+    ProjectMap,
+    Role,
+    ToolCall,
+    ToolResult,
+)
 from codator.infrastructure.api_clients import ClaudeBackend, OpenAIBackend
 from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
 from codator.infrastructure.tools.browser_tool import BrowserTool
@@ -253,8 +260,6 @@ class ChatEngine:
     def tools(self) -> ToolRegistry:
         return self._tools
 
-    async def execute_tool(self, call: ToolCall) -> Any:
+    async def execute_tool(self, call: ToolCall) -> ToolResult:
         """Execute a tool call and return the result."""
-        from codator.domain.models import ToolResult
-        result = await self._tools.execute(call)
-        return result
+        return await self._tools.execute(call)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from codator.domain.interfaces import Tool
 from codator.domain.models import ToolCall, ToolResult

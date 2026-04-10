@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
 from codator.domain.interfaces import Tool
 from codator.domain.models import ToolResult
@@ -112,7 +112,7 @@ class TerminalTool(Tool):
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=t,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.communicate()
                 return ToolResult(
