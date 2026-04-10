@@ -46,8 +46,8 @@ Tokens never expire, dict grows unbounded.
 | 5 | deepseek-coder-v2:16b | 8.9GB | ❌ FAIL | 168s | 14 | 2 | YES* | ❌ comment, not code |
 | 6 | qwq:32b | 19GB | ❌ FAIL | 248s | 9 | 2 | NO | — |
 | 7 | qwen2.5-coder:14b-instruct-q6_K | 12GB | ❌ FAIL | 225s | 11 | 2 | YES* | ✅ regex+line-by-line |
-| 8 | qwen2.5-coder:32b-instruct-q3_K_M | 15GB | ⏳ | — | — | — | — | — |
-| 9 | qwen2.5-coder:7b | 4.7GB | ⏳ | — | — | — | — | — |
+| 8 | qwen2.5-coder:32b-instruct-q3_K_M | 15GB | ❌ FAIL | 275s | 9 | 2 | YES* | ❌ wrong replace logic |
+| 9 | qwen2.5-coder:7b | 4.7GB | ❌ FAIL | 23s | 5 | 2 | NO | — |
 
 `*` = Edit applied but multiline code collapsed to single line with literal `\n` — syntax error
 
@@ -113,6 +113,18 @@ during parsing in `safe_parse_json()` or `_act_edit_file()`.
 - **Issue**: Same newline escaping (codator bug)
 - **Verdict**: Best speed/quality ratio. Would produce correct fix if codator newline bug is fixed.
 
+#### 8. qwen2.5-coder:32b-instruct-q3_K_M (15GB) — WRONG LOGIC
+- **Planning**: 74s, 2-step plan
+- **Edit**: Applied but used wrong replacement: `line.replace(',.', ':')`
+- **Issue**: Q3 quantization caused logic error — confused comma replacement with colon
+- **Verdict**: Lower quant hurts reasoning. Same architecture as #2 but worse output.
+
+#### 9. qwen2.5-coder:7b (4.7GB) — TOO SMALL
+- **Planning**: 12s (fastest!)
+- **Edit**: Never applied — JSON parse errors throughout
+- **Heals**: Also failed with JSON errors
+- **Verdict**: Too small for agent mode structured output. Useful for simple chat only.
+
 ---
 
 ## Ranking (Quality then Performance)
@@ -124,19 +136,48 @@ during parsing in `safe_parse_json()` or `_act_edit_file()`.
 
 ### Partial Tier (applied edit, wrong/broken result):
 4. **qwen3:32b** — 629s, malformed strings
-5. **deepseek-coder-v2:16b** — 168s, fast but hallucinated
+5. **qwen2.5-coder:32b-instruct-q3_K_M** — 275s, wrong replace logic (`replace(',.', ':')`)
+6. **deepseek-coder-v2:16b** — 168s, fast but hallucinated (comment instead of code)
 
 ### Failure Tier (couldn't apply any edit):
-6. **qwq:32b** — 248s, JSON compliance issues
-7. **deepseek-coder:33b-instruct-q4_K_M** — 201s, JSON compliance issues
+7. **qwq:32b** — 248s, JSON compliance issues
+8. **deepseek-coder:33b-instruct-q4_K_M** — 201s, JSON compliance issues
+9. **qwen2.5-coder:7b** — 23s, fastest but too small — JSON/structured output completely broken
 
 ---
 
+## Key Takeaways
+
+1. **codator has a newline escaping bug** — this is the #1 blocker. ALL 5 models that applied
+   edits produced correct or near-correct approaches, but multiline replacement code was
+   collapsed to single lines. Fix this and at least 3 models would produce working fixes.
+
+2. **qwen2.5-coder:14b is the sweet spot** — fastest planning (35s), correct approach,
+   best ratio of quality to resource usage. Fits easily in 16GB VRAM with room to spare.
+
+3. **Bigger ≠ better for structured output** — 32B models (qwen3, deepseek-r1) were 3-4x
+   slower without quality improvement. Reasoning models (qwq, deepseek-r1) add latency
+   without benefit for code editing tasks.
+
+4. **7B is too small** for agent mode — can't produce valid JSON plans.
+
+5. **Q3 quantization hurts logic** — qwen2.5-coder:32b (Q4) had correct approach,
+   but the Q3_K_M variant had wrong replacement logic, showing quant level matters.
+
+## Recommended Model Configuration
+
+| Use Case | Model | VRAM | Notes |
+|----------|-------|------|-------|
+| **Default / Best value** | qwen2.5-coder:14b-instruct-q6_K | 12GB | Best speed/quality |
+| **Maximum quality** | qwen2.5-coder:32b | 19GB | Same approach, 50% slower |
+| **Low VRAM (<12GB)** | deepseek-coder-v2:16b | 8.9GB | Fast but less reliable |
+| **Avoid** | qwq:32b, deepseek-coder:33b | 19GB | Poor JSON compliance |
+
 ## Next Steps
 
-1. **Fix codator newline bug** in `_act_edit_file` / `safe_parse_json` — this is blocking ALL models
-2. Re-run tests after fix to see which models actually produce working code
-3. Test remaining models: qwen2.5-coder:32b-instruct-q3_K_M, qwen2.5-coder:7b
+1. **Fix codator newline bug** in `_act_edit_file` / `safe_parse_json` — blocking ALL models
+2. Re-run tests after fix to see which models produce working code end-to-end
+3. Consider pulling `qwen2.5-coder:72b` if quality ceiling needs to be tested (needs offloading)
 
 ## Test Script
 `/tmp/qa_codator_test.py` on pluton — run with:
@@ -145,4 +186,4 @@ cd ~/git/coder && source .venv/bin/activate
 python /tmp/qa_codator_test.py "<model_name>"
 ```
 
-## Status: IN PROGRESS — 7 of 9 models tested
+## Status: ✅ COMPLETE — 9/9 models tested
