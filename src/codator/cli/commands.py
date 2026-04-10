@@ -374,10 +374,17 @@ async def _handle_ollama(arg: str, engine: ChatEngine) -> None:
 
 
 async def run_agent_task(task: str, engine: ChatEngine) -> None:
-    """Run the Plan-Act-Verify agent cycle for a task. Shared by /agent and agent mode."""
+    """Run the interactive agent cycle: Analyze → Propose → Pick → Implement.
+
+    Uses streaming to show model thinking in real-time (like Claude).
+    """
+    import asyncio
+
+    from rich.markdown import Markdown
+    from rich.panel import Panel
     from rich.table import Table
 
-    from codator.core.agent_loop import PlanActVerifyAgent
+    from codator.core.agent_loop import PlanActVerifyAgent, Proposal
 
     ollama_cfg = engine._settings.ollama
     agent = PlanActVerifyAgent(
@@ -386,45 +393,151 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
         project_root=engine._project_root,
     )
 
-    step_log: list[tuple[str, str]] = []
+    # --- Helpers ---
 
     def on_step(description: str, status: str) -> None:
         icon = {"started": "🔄", "running": "⏳", "done": "✅", "failed": "❌"}.get(
             status, "•"
         )
-        step_log.append((icon, description))
         console.print(f"  {icon} {description}")
 
+    # Track whether we're showing thinking vs summary
+    _thinking_phase = {"active": False, "label": "", "has_output": False}
+
+    def on_token(token: str) -> None:
+        """Print model tokens in real-time — dimmed for thinking."""
+        if _thinking_phase.get("active"):
+            if not _thinking_phase.get("has_output"):
+                console.print("[dim italic]  💭 thinking…[/dim italic]")
+                _thinking_phase["has_output"] = True
+            console.print(f"[dim]{token}[/dim]", end="", highlight=False)
+
+    def _start_thinking(label: str = "thinking") -> None:
+        _thinking_phase["active"] = True
+        _thinking_phase["label"] = label
+        _thinking_phase["has_output"] = False
+
+    def _stop_thinking() -> None:
+        if _thinking_phase.get("has_output"):
+            console.print()  # newline after streamed tokens
+        _thinking_phase["active"] = False
+
+    # --- Build project context ---
+
+    project_context = _build_project_context(engine)
+
     print_info(f"🤖 Agent starting: {task}")
+
     try:
-        project_context = ""
+        # ================================================================
+        # Phase 1: Analyze & Propose
+        # ================================================================
+        console.print()
+        console.print("[bold cyan]━━━ Phase 1: Analysis ━━━[/bold cyan]")
+
+        _start_thinking("analysis")
+
+        proposals, analysis_actions = await agent.analyze_and_propose(
+            task,
+            project_context=project_context,
+            on_step=on_step,
+            on_token=on_token,
+        )
+
+        _stop_thinking()
+
+        if not proposals:
+            console.print("[yellow]No proposals generated. Try a different question.[/yellow]")
+            return
+
+        # ================================================================
+        # Phase 2: Present proposals to user
+        # ================================================================
+        console.print()
+        console.print("[bold cyan]━━━ Proposals ━━━[/bold cyan]")
+        console.print()
+
+        _priority_colors = {"high": "red", "medium": "yellow", "low": "green"}
+
+        for p in proposals:
+            color = _priority_colors.get(p.priority, "white")
+            console.print(
+                Panel(
+                    f"{p.description}\n[dim]File: {p.file}[/dim]",
+                    title=f"[bold][{color}]{p.index + 1}. [{p.priority.upper()}] {p.title}[/{color}][/bold]",
+                    border_style=color,
+                    padding=(0, 1),
+                )
+            )
+
+        # ================================================================
+        # Phase 3: User picks which proposals to implement
+        # ================================================================
+        console.print()
+        console.print(
+            "[bold]Which proposals to implement?[/bold] "
+            "(e.g. [cyan]1,3,5[/cyan] or [cyan]all[/cyan] or [cyan]none[/cyan])"
+        )
+
         try:
-            from pathlib import Path
-            root = Path(engine._project_root).resolve()
-            code_exts = {".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp", ".rb"}
-            files = []
-            for f in sorted(root.rglob("*")):
-                if f.is_file() and f.suffix in code_exts:
-                    rel = f.relative_to(root)
-                    parts = rel.parts
-                    if any(p.startswith(".") or p in (
-                        "__pycache__", "node_modules", ".venv", "venv",
-                    ) for p in parts):
-                        continue
-                    files.append(str(rel))
-            if files:
-                project_context = "Project file tree:\n" + "\n".join(files[:200])
-                if len(files) > 200:
-                    project_context += f"\n... and {len(files) - 200} more files"
-        except Exception:
-            pass
+            choice = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: input("implement> ").strip().lower(),
+            )
+        except (EOFError, KeyboardInterrupt):
+            print_info("Cancelled.")
+            return
 
-        result = await agent.run(task, project_context=project_context, on_step=on_step)
+        if not choice or choice == "none":
+            print_info("No proposals selected. Done.")
+            return
 
-        table = Table(title="Agent Result", border_style="cyan")
+        if choice == "all":
+            selected = proposals
+        else:
+            # Parse comma-separated numbers
+            selected_indices: set[int] = set()
+            for part in choice.replace(" ", "").split(","):
+                try:
+                    idx = int(part) - 1  # 1-based → 0-based
+                    if 0 <= idx < len(proposals):
+                        selected_indices.add(idx)
+                except ValueError:
+                    pass
+            if not selected_indices:
+                print_info("No valid selections. Done.")
+                return
+            selected = [p for p in proposals if p.index in selected_indices]
+
+        console.print()
+        console.print(
+            f"[bold green]Implementing {len(selected)} proposal(s)…[/bold green]"
+        )
+
+        # ================================================================
+        # Phase 4: Implement selected proposals
+        # ================================================================
+        console.print()
+        console.print("[bold cyan]━━━ Phase 2: Implementation ━━━[/bold cyan]")
+
+        _start_thinking("implementing")
+
+        result = await agent.implement_proposals(
+            selected,
+            task=task,
+            project_context=project_context,
+            on_step=on_step,
+            on_token=on_token,
+        )
+
+        _stop_thinking()
+
+        # ================================================================
+        # Results
+        # ================================================================
+        table = Table(title="Implementation Result", border_style="cyan")
         table.add_column("Metric", style="bold")
         table.add_column("Value")
-        table.add_row("Task", result.plan.task)
+        table.add_row("Proposals implemented", str(len(selected)))
         table.add_row("Steps executed", str(len(result.actions)))
         table.add_row("Heal iterations", str(result.heal_iterations))
         table.add_row(
@@ -433,22 +546,37 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
         )
         if result.verification.errors:
             table.add_row("Errors", "\n".join(result.verification.errors[:5]))
-        if result.verification.warnings:
-            table.add_row("Warnings", "\n".join(result.verification.warnings[:5]))
         console.print(table)
 
-        for action in result.actions:
-            if (
-                action.success
-                and action.step.action == "analyze"
-                and action.step.target == "summary"
-                and action.output
-            ):
-                from rich.markdown import Markdown
-                console.print()
-                console.print(Markdown(action.output))
     except Exception as exc:
+        _stop_thinking()
         print_error(f"Agent failed: {exc}")
+
+
+def _build_project_context(engine: ChatEngine) -> str:
+    """Scan project root for code files and return a file-tree string."""
+    from pathlib import Path
+    try:
+        root = Path(engine._project_root).resolve()
+        code_exts = {".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp", ".rb"}
+        files = []
+        for f in sorted(root.rglob("*")):
+            if f.is_file() and f.suffix in code_exts:
+                rel = f.relative_to(root)
+                parts = rel.parts
+                if any(p.startswith(".") or p in (
+                    "__pycache__", "node_modules", ".venv", "venv",
+                ) for p in parts):
+                    continue
+                files.append(str(rel))
+        if files:
+            ctx = "Project file tree:\n" + "\n".join(files[:200])
+            if len(files) > 200:
+                ctx += f"\n... and {len(files) - 200} more files"
+            return ctx
+    except Exception:
+        pass
+    return ""
 
 
 async def _handle_agent(arg: str, engine: ChatEngine) -> None:
