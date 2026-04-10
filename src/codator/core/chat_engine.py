@@ -37,7 +37,7 @@ from codator.infrastructure.tools.terminal_tool import TerminalTool
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ITERATIONS = 10
+MAX_TOOL_ITERATIONS = 5
 
 SYSTEM_PROMPT = """\
 You are **codator**, a senior software engineering assistant running locally. \
@@ -292,6 +292,7 @@ class ChatEngine:
     async def _agentic_chat_stream(self) -> AsyncIterator[str]:
         """Agentic loop: generate → detect tool calls → execute → re-generate."""
         tools_defs = self._tools.to_openai_tools()
+        seen_calls: set[str] = set()  # Track (tool_name, params) to detect loops
 
         for _iteration in range(MAX_TOOL_ITERATIONS):
             # Non-streaming call with tool support
@@ -318,6 +319,38 @@ class ChatEngine:
                 )
                 self._context.add_message(assistant_msg)
                 return
+
+            # Detect repeated tool calls (loop prevention)
+            call_keys = frozenset(
+                f"{tc.tool_name}:{json.dumps(tc.parameters, sort_keys=True)}"
+                for tc in tool_calls
+            )
+            new_calls = call_keys - seen_calls
+            if not new_calls:
+                # All calls are repeats — force a text response
+                logger.warning("Loop detected: model repeating same tool calls, forcing answer")
+                force_msg = Message(
+                    role=Role.USER,
+                    content=(
+                        "[System]: You already called these tools with the same arguments. "
+                        "Stop calling tools and provide your final answer based on the "
+                        "information you already have."
+                    ),
+                )
+                self._context.add_message(force_msg)
+                # One more generation without tools to force text
+                final = await self._backend.generate(
+                    self._context.get_messages(),
+                    max_tokens=self._settings.inference.max_tokens,
+                    temperature=self._settings.inference.temperature,
+                )
+                if final.text:
+                    yield final.text
+                self._context.add_message(
+                    Message(role=Role.ASSISTANT, content=final.text or "")
+                )
+                return
+            seen_calls.update(call_keys)
 
             # Model wants to call tools — store assistant message
             assistant_msg = Message(
