@@ -29,6 +29,7 @@ logger = logging.getLogger("codator")
 COMMANDS = [
     "/help", "/quit", "/exit", "/model", "/api", "/context",
     "/clear", "/hardware", "/index", "/git", "/web",
+    "/ssh", "/browser", "/terminal", "/ollama",
 ]
 command_completer = WordCompleter(COMMANDS, sentence=True)
 
@@ -40,8 +41,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", "-m", help="Path to GGUF model file")
     parser.add_argument(
-        "--api", choices=["claude", "openai"],
-        help="Use cloud API instead of local model",
+        "--api", choices=["claude", "openai", "ollama"],
+        help="Use cloud API or local Ollama instead of GGUF model",
     )
     parser.add_argument("--project", "-p", default=".", help="Project root directory")
     parser.add_argument("--web", action="store_true", help="Also start web dashboard")
