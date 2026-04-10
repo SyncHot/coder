@@ -60,9 +60,39 @@ def parse_args() -> argparse.Namespace:
 async def async_main():
     args = parse_args()
 
-    # Logging
-    level = logging.DEBUG if args.verbose else logging.WARNING
-    logging.basicConfig(level=level, format="%(name)s %(levelname)s: %(message)s")
+    # Logging — always log to file for debugging, console level from --verbose
+    from pathlib import Path
+    log_dir = Path.home() / ".codator" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "codator.log"
+
+    # File handler — always DEBUG, rotates at 5 MB
+    from logging.handlers import RotatingFileHandler
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(name)s %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+
+    # Console handler — WARNING by default, DEBUG with --verbose
+    console_level = logging.DEBUG if args.verbose else logging.WARNING
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(console_level)
+    console_handler.setFormatter(logging.Formatter(
+        "%(name)s %(levelname)s: %(message)s",
+    ))
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+    logger.info("=" * 60)
+    logger.info("codator starting — log file: %s", log_file)
+    logger.info("=" * 60)
 
     # Config
     config_path = None

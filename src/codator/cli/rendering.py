@@ -253,6 +253,7 @@ def print_help():
 | `/undo [file]` | Restore file(s) from .bak backups |
 | `/fetch <url>` | Fetch a web page as text |
 | `/search <query>` | Search the web via DuckDuckGo |
+| `/log [N]` | Show log file location and tail last N lines (default 30) |
 """
     console.print(Markdown(help_text))
 

@@ -128,10 +128,48 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
         case "/search":
             await _handle_search(arg, engine)
 
+        case "/log":
+            await _handle_log(arg)
+
         case _:
             print_error(f"Unknown command: {command}. Type /help for available commands.")
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Log viewer
+# ---------------------------------------------------------------------------
+
+
+async def _handle_log(arg: str) -> None:
+    """Show log file location and tail recent entries."""
+    from pathlib import Path
+
+    log_path = Path.home() / ".codator" / "logs" / "codator.log"
+
+    if not log_path.exists():
+        print_info(f"Log file: {log_path}\n  (no log file yet — start with -v for verbose logging)")
+        return
+
+    lines_str = arg.strip() if arg.strip() else "30"
+    try:
+        n = int(lines_str)
+    except ValueError:
+        print_error(f"Invalid line count: {lines_str}")
+        return
+
+    size = log_path.stat().st_size
+    size_str = f"{size / 1024:.1f} KB" if size < 1048576 else f"{size / 1048576:.1f} MB"
+    print_info(f"Log file: {log_path}  ({size_str})")
+    print_info(f"Last {n} lines:\n")
+
+    all_lines = log_path.read_text(errors="replace").splitlines()
+    tail = all_lines[-n:] if len(all_lines) > n else all_lines
+    from rich.console import Console
+    from rich.syntax import Syntax
+    console = Console()
+    console.print(Syntax("\n".join(tail), "log", theme="monokai", line_numbers=False))
 
 
 # ---------------------------------------------------------------------------
