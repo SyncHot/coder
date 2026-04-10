@@ -220,7 +220,9 @@ class ChatEngine:
             self._backend = OpenAIBackend(self._settings)
             self._active_model = self._settings.api.openai_model
         elif provider == "ollama":
-            self._backend = OllamaBackend(self._settings)
+            self._backend = OllamaBackend(
+                self._settings, num_ctx=self._settings.inference.context_size,
+            )
             self._active_model = self._settings.ollama.model
 
     def _register_tools(self):
@@ -587,7 +589,9 @@ class ChatEngine:
             self._backend = OpenAIBackend(self._settings)
             self._active_model = self._settings.api.openai_model
         elif provider == "ollama":
-            self._backend = OllamaBackend(self._settings)
+            self._backend = OllamaBackend(
+                self._settings, num_ctx=self._settings.inference.context_size,
+            )
             self._active_model = self._settings.ollama.model
         else:
             return f"Unknown provider: {provider}"
@@ -596,11 +600,14 @@ class ChatEngine:
 
     async def switch_ollama_model(self, model: str) -> str:
         """Switch to a specific Ollama model (disables auto-selection)."""
+        num_ctx = self._settings.inference.context_size
         if isinstance(self._backend, OllamaBackend):
-            self._backend.switch_model(model)
+            self._backend.switch_model(model, num_ctx=num_ctx)
         else:
             await self._backend.close()
-            self._backend = OllamaBackend(self._settings, model=model)
+            self._backend = OllamaBackend(
+                self._settings, model=model, num_ctx=num_ctx,
+            )
         self._active_model = model
         self._manual_model_override = True
         return f"Switched to Ollama model: {model}"

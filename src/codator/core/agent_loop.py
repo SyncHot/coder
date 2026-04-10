@@ -193,11 +193,13 @@ class PlanActVerifyAgent:
         model: str = "qwen2.5-coder:14b-instruct-q6_K",
         project_root: str = ".",
         max_heal_iterations: int = 3,
+        num_ctx: int = 32768,
     ) -> None:
         self._base_url = ollama_base_url.rstrip("/")
         self._model = model
         self._project_root = Path(project_root).resolve()
         self._max_heal = max_heal_iterations
+        self._num_ctx = num_ctx
         self._terminal = TerminalTool(
             working_dir=str(self._project_root),
             timeout=60,
@@ -231,6 +233,7 @@ class PlanActVerifyAgent:
                 {"role": "user", "content": user},
             ],
             "stream": on_token is not None,
+            "options": {"num_ctx": self._num_ctx},
         }
         if force_json:
             payload["format"] = "json"

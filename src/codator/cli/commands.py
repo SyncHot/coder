@@ -391,6 +391,7 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
         ollama_base_url=ollama_cfg.base_url,
         model=engine.active_model or ollama_cfg.model,
         project_root=engine._project_root,
+        num_ctx=engine._settings.inference.context_size,
     )
 
     # --- Helpers ---
