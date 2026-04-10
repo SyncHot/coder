@@ -37,6 +37,7 @@ from codator.infrastructure.tools.file_tool import (
 )
 from codator.infrastructure.tools.ssh_tool import SSHTool
 from codator.infrastructure.tools.terminal_tool import TerminalTool
+from codator.infrastructure.tools.web_tools import WebFetchTool, WebSearchTool
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,10 @@ class ChatEngine:
             viewport_height=cfg.browser.viewport_height,
         )
         self._tools.register(browser)
+
+        # Web tools — lightweight fetch & search (no API key needed)
+        self._tools.register(WebFetchTool())
+        self._tools.register(WebSearchTool())
 
     def _build_system_prompt(self) -> str:
         project_ctx = ""

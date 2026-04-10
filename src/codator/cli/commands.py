@@ -119,6 +119,12 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
         case "/undo":
             await _handle_undo(arg, engine)
 
+        case "/fetch":
+            await _handle_fetch(arg, engine)
+
+        case "/search":
+            await _handle_search(arg, engine)
+
         case _:
             print_error(f"Unknown command: {command}. Type /help for available commands.")
 
@@ -645,3 +651,33 @@ async def _handle_undo(arg: str, engine: ChatEngine) -> None:
         return
     os.replace(bak, target)
     print_info(f"Restored {arg} from backup.")
+
+
+# ---------------------------------------------------------------------------
+# Web tools handlers
+# ---------------------------------------------------------------------------
+
+async def _handle_fetch(arg: str, engine: ChatEngine) -> None:
+    """Handle /fetch <url>."""
+    if not arg.strip():
+        print_error("Usage: /fetch <url>")
+        return
+
+    from codator.domain.models import ToolCall
+    result = await engine._tools.execute(
+        ToolCall(tool_name="web_fetch", parameters={"url": arg.strip()})
+    )
+    print_tool_result(result)
+
+
+async def _handle_search(arg: str, engine: ChatEngine) -> None:
+    """Handle /search <query>."""
+    if not arg.strip():
+        print_error("Usage: /search <query>")
+        return
+
+    from codator.domain.models import ToolCall
+    result = await engine._tools.execute(
+        ToolCall(tool_name="web_search", parameters={"query": arg.strip()})
+    )
+    print_tool_result(result)

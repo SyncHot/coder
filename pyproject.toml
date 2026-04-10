@@ -37,6 +37,8 @@ dependencies = [
     # Async
     "aiofiles>=24.1.0",
     "httpx>=0.27.0",
+    # Web scraping (for web_fetch tool)
+    "beautifulsoup4>=4.12.0",
     # GPU monitoring
     "psutil>=6.1.0",
 ]

@@ -8,13 +8,15 @@ import logging
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 
 from codator.cli.commands import handle_command
 from codator.cli.rendering import (
     StreamingMarkdownRenderer,
     console,
-    print_compaction_notice,
+    print_compaction_inline,
+    print_context_line,
     print_error,
     print_info,
     print_welcome,
@@ -32,6 +34,7 @@ COMMANDS = [
     "/ssh", "/browser", "/terminal", "/ollama",
     "/agent", "/gpu", "/memory", "/mcp",
     "/save", "/load", "/history", "/undo",
+    "/fetch", "/search",
 ]
 command_completer = WordCompleter(COMMANDS, sentence=True)
 
@@ -116,10 +119,48 @@ async def async_main():
         asyncio.create_task(server.serve())
         print_info(f"Web dashboard: http://{web_cfg.host}:{web_cfg.port}")
 
+    # Dynamic bottom toolbar callable
+    def _toolbar():
+        ctx = engine.context_status
+        if not ctx:
+            return HTML(
+                f'<b>{engine.active_model or "no model"}</b>'
+            )
+
+        total = ctx.get("total_tokens", 0)
+        window = ctx.get("context_window", 1)
+        pct = ctx.get("usage_percent", 0)
+        msgs = ctx.get("message_count", 0)
+        compactions = ctx.get("compaction_count", 0)
+
+        # Color based on usage
+        if pct >= 80:
+            color = "ansired"
+        elif pct >= 50:
+            color = "ansiyellow"
+        else:
+            color = "ansigreen"
+
+        # Context bar (10 chars wide)
+        filled = int(pct / 10)
+        bar = "█" * filled + "░" * (10 - filled)
+
+        parts = [
+            f'<b>{engine.active_model or "no model"}</b>',
+            f'<{color}>[{bar}] {pct:.0f}%</{color}>',
+            f'{total:,}/{window:,} tokens',
+            f'{msgs} msgs',
+        ]
+        if compactions > 0:
+            parts.append(f'⚡{compactions} compactions')
+
+        return HTML(" │ ".join(parts))
+
     # Interactive prompt session
     session: PromptSession = PromptSession(
         history=InMemoryHistory(),
         completer=command_completer,
+        bottom_toolbar=_toolbar,
     )
 
     try:
@@ -159,10 +200,17 @@ async def async_main():
                 renderer.flush()
                 console.print()  # newline after streaming
 
-                # Check if compaction happened
-                ctx_after = engine.context_status.get("total_tokens", 0)
-                if engine.context_status.get("compaction_count", 0) > 0 and ctx_after < ctx_before:
-                    print_compaction_notice(ctx_before, ctx_after)
+                # Check if compaction happened — show inline notice
+                ctx_after = engine.context_status
+                compaction_count = ctx_after.get("compaction_count", 0)
+                if compaction_count > 0 and ctx_after.get("total_tokens", 0) < ctx_before:
+                    print_compaction_inline(
+                        ctx_before,
+                        ctx_after.get("total_tokens", 0),
+                    )
+
+                # Show context status line after each response
+                print_context_line(ctx_after, engine.active_model)
 
             except FileNotFoundError as exc:
                 print_error(str(exc))

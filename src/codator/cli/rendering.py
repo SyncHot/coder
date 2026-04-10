@@ -152,6 +152,39 @@ def print_compaction_notice(before: int, after: int):
     ))
 
 
+def print_compaction_inline(before: int, after: int):
+    """Slim inline compaction notice (Claude-style)."""
+    console.print(
+        f"[yellow]⚡ Context compacted: {before:,} → {after:,} tokens "
+        f"| Summary preserved | /context for details[/yellow]"
+    )
+
+
+def print_context_line(status: dict, model: str | None = None):
+    """Dim after-turn status line showing context usage."""
+    if not status:
+        return
+
+    total = status.get("total_tokens", 0)
+    window = status.get("context_window", 1)
+    pct = status.get("usage_percent", 0)
+    msgs = status.get("message_count", 0)
+    model_name = model or "unknown"
+
+    # Format tokens in K for readability
+    def _fmt(n: int) -> str:
+        return f"{n / 1000:.1f}K" if n >= 1000 else str(n)
+
+    line = f"── {_fmt(total)} / {_fmt(window)} tokens ({pct:.0f}%) ─ {msgs} msgs ─ {model_name} ──"
+
+    if pct >= 80:
+        console.print(f"[bold yellow]⚠ Context {pct:.0f}% full — will compact soon[/bold yellow]")
+    elif pct >= 70:
+        console.print(f"[yellow]{line}[/yellow]")
+    else:
+        console.print(f"[dim]{line}[/dim]")
+
+
 def print_hardware_info(hw, recommendations):
     table = Table(title="Hardware Detection", border_style="green")
     table.add_column("Property", style="bold")
@@ -215,6 +248,8 @@ def print_help():
 | `/load <id>` | Load a saved conversation |
 | `/history` | List saved conversations |
 | `/undo [file]` | Restore file(s) from .bak backups |
+| `/fetch <url>` | Fetch a web page as text |
+| `/search <query>` | Search the web via DuckDuckGo |
 """
     console.print(Markdown(help_text))
 
