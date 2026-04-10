@@ -10,10 +10,14 @@ from codator.config import AppSettings, get_settings
 from codator.core.context_manager import AdaptiveContextManager
 from codator.core.git_integration import GitContext
 from codator.core.project_indexer import TreeSitterProjectIndexer
+from codator.core.tool_registry import ToolRegistry
 from codator.domain.interfaces import InferenceBackend
-from codator.domain.models import GenerationResult, Message, ProjectMap, Role
+from codator.domain.models import GenerationResult, Message, ProjectMap, Role, ToolCall
 from codator.infrastructure.api_clients import ClaudeBackend, OpenAIBackend
 from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
+from codator.infrastructure.tools.browser_tool import BrowserTool
+from codator.infrastructure.tools.ssh_tool import SSHTool
+from codator.infrastructure.tools.terminal_tool import TerminalTool
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +53,12 @@ class ChatEngine:
         self._git = GitContext(project_root)
         self._project_map: ProjectMap | None = None
         self._active_model: str = ""
+        self._tools = ToolRegistry()
 
     # ----- Lifecycle -----
 
     async def initialize(self, model_path: str | None = None) -> None:
-        """Set up backends, index project, and prepare system prompt."""
+        """Set up backends, index project, register tools, and prepare system prompt."""
         # Index project
         try:
             self._project_map = await self._indexer.index(self._project_root)
@@ -70,6 +75,9 @@ class ChatEngine:
                 self._try_api_backend()
         else:
             self._try_api_backend()
+
+        # Register agentic tools
+        self._register_tools()
 
         # Context manager
         self._context = AdaptiveContextManager(
@@ -92,6 +100,33 @@ class ChatEngine:
             self._backend = OpenAIBackend(self._settings)
             self._active_model = self._settings.api.openai_model
 
+    def _register_tools(self):
+        """Register SSH, Browser, and Terminal tools from settings."""
+        cfg = self._settings
+
+        ssh = SSHTool(
+            host=cfg.ssh.host, port=cfg.ssh.port,
+            username=cfg.ssh.username, password=cfg.ssh.password,
+            key_path=cfg.ssh.key_path, timeout=cfg.ssh.timeout,
+        )
+        self._tools.register(ssh)
+
+        browser = BrowserTool(
+            headless=cfg.browser.headless,
+            timeout=cfg.browser.timeout,
+            viewport_width=cfg.browser.viewport_width,
+            viewport_height=cfg.browser.viewport_height,
+        )
+        self._tools.register(browser)
+
+        terminal = TerminalTool(
+            working_dir=cfg.terminal.working_dir,
+            timeout=cfg.terminal.timeout,
+            require_confirm=cfg.terminal.require_confirm,
+            dangerous_patterns=cfg.terminal.dangerous_patterns,
+        )
+        self._tools.register(terminal)
+
     def _build_system_prompt(self) -> str:
         project_ctx = ""
         if self._project_map:
@@ -101,7 +136,12 @@ class ChatEngine:
         if self._git.is_available:
             git_ctx = f"--- Git Context ---\n{self._git.get_work_context()}"
 
-        return SYSTEM_PROMPT.format(project_context=project_ctx, git_context=git_ctx)
+        tools_ctx = self._tools.tool_prompt_section()
+
+        return SYSTEM_PROMPT.format(
+            project_context=project_ctx,
+            git_context=git_ctx,
+        ) + ("\n\n" + tools_ctx if tools_ctx else "")
 
     # ----- Chat -----
 
@@ -205,3 +245,16 @@ class ChatEngine:
         await self._backend.close()
         if self._summary_backend:
             await self._summary_backend.close()
+        await self._tools.close_all()
+
+    # ----- Tool execution -----
+
+    @property
+    def tools(self) -> ToolRegistry:
+        return self._tools
+
+    async def execute_tool(self, call: ToolCall) -> Any:
+        """Execute a tool call and return the result."""
+        from codator.domain.models import ToolResult
+        result = await self._tools.execute(call)
+        return result

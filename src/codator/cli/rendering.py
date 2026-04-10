@@ -106,5 +106,36 @@ def print_help():
 | `/index` | Re-index project |
 | `/git` | Show git work context |
 | `/web` | Start web dashboard |
+| `/ssh <action>` | SSH tool (connect/exec/upload/download/close) |
+| `/browser <action>` | Browser tool (launch/navigate/click/screenshot/close) |
+| `/terminal <cmd>` | Run a local shell command (sandboxed) |
 """
     console.print(Markdown(help_text))
+
+
+def print_tool_result(result):
+    """Render a ToolResult in the terminal."""
+    from codator.domain.models import ToolResult
+
+    if not isinstance(result, ToolResult):
+        console.print(f"[dim]{result}[/dim]")
+        return
+
+    if result.success:
+        style = "green"
+        icon = "✓"
+    else:
+        style = "red"
+        icon = "✗"
+
+    console.print(Panel(
+        f"[{style}]{icon}[/{style}] "
+        + (f"[bold]{result.output}[/bold]" if result.output else "")
+        + (f"\n[red]{result.error}[/red]" if result.error else "")
+        + (
+            f"\n[dim]exit code: {result.exit_code}[/dim]"
+            if result.exit_code is not None else ""
+        ),
+        title="Tool Result",
+        border_style=style,
+    ))

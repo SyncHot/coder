@@ -161,3 +161,27 @@ class GenerationResult:
     time_seconds: float = 0.0
     model_name: str = ""
     stopped_by: str = ""  # "eos", "limit", "error"
+
+
+# ---------------------------------------------------------------------------
+# Tool calling
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ToolCall:
+    """A request from the model to invoke a tool."""
+
+    tool_name: str
+    parameters: dict[str, Any] = field(default_factory=dict)
+    call_id: str = ""
+
+
+@dataclass
+class ToolResult:
+    """Result of a tool execution."""
+
+    success: bool
+    output: str = ""
+    error: str = ""
+    exit_code: int | None = None
+    artifacts: dict[str, Any] = field(default_factory=dict)

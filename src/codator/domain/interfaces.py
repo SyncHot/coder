@@ -13,6 +13,7 @@ if TYPE_CHECKING:
         Message,
         ModelRecommendation,
         ProjectMap,
+        ToolResult,
     )
 
 
@@ -96,3 +97,27 @@ class ContextManager(ABC):
     @abstractmethod
     def clear(self) -> None:
         ...
+
+
+class Tool(ABC):
+    """Interface for agentic tools (SSH, browser, terminal, etc.)."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Short identifier, e.g. 'ssh', 'browser', 'terminal'."""
+        ...
+
+    @property
+    @abstractmethod
+    def description(self) -> str:
+        """Human-readable description for the model."""
+        ...
+
+    @abstractmethod
+    async def execute(self, **kwargs) -> ToolResult:
+        """Run the tool with the given parameters."""
+        ...
+
+    async def close(self) -> None:
+        """Release resources (connections, browsers, etc.)."""

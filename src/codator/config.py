@@ -64,12 +64,49 @@ class ProjectConfig(BaseModel):
     max_file_size: int = 524_288
 
 
+class SSHConfig(BaseModel):
+    host: str = ""
+    port: int = 22
+    username: str = ""
+    password: str = ""
+    key_path: str = ""
+    timeout: int = 30
+
+
+class BrowserConfig(BaseModel):
+    headless: bool = True
+    timeout: int = 30_000
+    viewport_width: int = 1280
+    viewport_height: int = 720
+
+
+class TerminalConfig(BaseModel):
+    working_dir: str = "."
+    timeout: int = 60
+    require_confirm: bool = True
+    dangerous_patterns: list[str] = Field(default_factory=lambda: [
+        r"rm\s+-rf\s+/",
+        r"sudo\s+rm",
+        r"mkfs\.",
+        r"dd\s+if=",
+        r"chmod\s+777",
+        r":\(\)\s*\{",
+        r">\s*/dev/sd",
+        r"shutdown",
+        r"reboot",
+        r"init\s+0",
+    ])
+
+
 class AppSettings(BaseSettings):
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     project: ProjectConfig = Field(default_factory=ProjectConfig)
+    ssh: SSHConfig = Field(default_factory=SSHConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    terminal: TerminalConfig = Field(default_factory=TerminalConfig)
 
 
 # ---------------------------------------------------------------------------

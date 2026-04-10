@@ -71,3 +71,41 @@ exclude_dirs = [
 ]
 # Max file size to index (bytes)
 max_file_size = 524288
+
+# ---------------------------------------------------------------------------
+# Agentic Tools
+# ---------------------------------------------------------------------------
+
+[ssh]
+# Default SSH connection settings
+host = ""
+port = 22
+username = ""
+password = ""
+key_path = ""
+timeout = 30
+
+[browser]
+# Playwright browser automation
+headless = true
+timeout = 30000
+viewport_width = 1280
+viewport_height = 720
+
+[terminal]
+# Sandboxed local shell execution
+working_dir = "."
+timeout = 60
+require_confirm = true
+dangerous_patterns = [
+    'rm\s+-rf\s+/',
+    'sudo\s+rm',
+    'mkfs\.',
+    'dd\s+if=',
+    'chmod\s+777',
+    ':\(\)\s*\{',
+    '>\s*/dev/sd',
+    'shutdown',
+    'reboot',
+    'init\s+0',
+]
