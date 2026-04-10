@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codator"
+version = "0.1.0"
+description = "Dev-Assistant-OS — local AI coding assistant with ROCm + cloud API support"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+
+dependencies = [
+    # Inference
+    "llama-cpp-python>=0.3.0",
+    # API clients
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+    # CLI
+    "rich>=13.9.0",
+    "prompt-toolkit>=3.0.48",
+    # Web
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "jinja2>=3.1.4",
+    # Context & tokenizer
+    "tiktoken>=0.8.0",
+    # Project indexing
+    "tree-sitter>=0.23.0",
+    "tree-sitter-languages>=1.10.0",
+    # Git
+    "gitpython>=3.1.43",
+    # Config
+    "tomli>=2.0.2; python_version < '3.12'",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    # Async
+    "aiofiles>=24.1.0",
+    "httpx>=0.27.0",
+    # GPU monitoring
+    "psutil>=6.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.7.0",
+]
+
+[project.scripts]
+codator = "codator.cli.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codator"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

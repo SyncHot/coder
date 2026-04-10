@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>codator — Dashboard</title>
+    <style>
+        :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #c9d1d9; --accent: #58a6ff; --green: #3fb950; --yellow: #d29922; --red: #f85149; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+        .container { max-width: 1000px; margin: 0 auto; padding: 2rem; }
+        h1 { color: var(--accent); margin-bottom: 1.5rem; font-size: 1.8rem; }
+        h2 { color: var(--accent); margin: 1.5rem 0 0.8rem; font-size: 1.2rem; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin-bottom: 1rem; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        .stat { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid var(--border); }
+        .stat:last-child { border-bottom: none; }
+        .stat-label { color: #8b949e; }
+        .stat-value { font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+        .bar-container { background: var(--border); border-radius: 4px; height: 24px; overflow: hidden; margin: 0.5rem 0; }
+        .bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; display: flex; align-items: center; padding-left: 8px; font-size: 0.8rem; font-weight: 600; }
+        .bar-green { background: var(--green); }
+        .bar-yellow { background: var(--yellow); color: #000; }
+        .bar-red { background: var(--red); }
+        input, select, button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.8rem; font-size: 0.9rem; }
+        button { background: var(--accent); color: #fff; border: none; cursor: pointer; font-weight: 600; }
+        button:hover { opacity: 0.9; }
+        .input-group { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+        .input-group input { flex: 1; }
+        .rec-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+        .rec-table th, .rec-table td { padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border); }
+        .rec-table th { color: var(--accent); font-size: 0.85rem; }
+        .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+        .badge-gpu { background: var(--green); color: #000; }
+        .badge-hybrid { background: var(--yellow); color: #000; }
+        #refresh-btn { position: fixed; top: 1rem; right: 1rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 codator Dashboard</h1>
+        <button id="refresh-btn" onclick="refresh()">⟳ Refresh</button>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Active Model</h2>
+                <div class="stat"><span class="stat-label">Model</span><span class="stat-value" id="model-name">—</span></div>
+                <div class="input-group">
+                    <input type="text" id="model-path" placeholder="/path/to/model.gguf">
+                    <button onclick="switchModel()">Load</button>
+                </div>
+                <div class="input-group" style="margin-top:0.5rem">
+                    <select id="api-provider"><option value="claude">Claude</option><option value="openai">OpenAI</option></select>
+                    <button onclick="switchAPI()">Switch API</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Context Window</h2>
+                <div class="bar-container"><div class="bar-fill" id="ctx-bar">0%</div></div>
+                <div class="stat"><span class="stat-label">Tokens</span><span class="stat-value" id="ctx-tokens">—</span></div>
+                <div class="stat"><span class="stat-label">Messages</span><span class="stat-value" id="ctx-messages">—</span></div>
+                <div class="stat"><span class="stat-label">Compactions</span><span class="stat-value" id="ctx-compactions">—</span></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>GPU / Hardware</h2>
+            <div class="grid">
+                <div>
+                    <div class="stat"><span class="stat-label">GPU</span><span class="stat-value" id="hw-gpu">—</span></div>
+                    <div class="stat"><span class="stat-label">VRAM</span><span class="stat-value" id="hw-vram">—</span></div>
+                    <div class="stat"><span class="stat-label">ROCm</span><span class="stat-value" id="hw-rocm">—</span></div>
+                </div>
+                <div>
+                    <div class="stat"><span class="stat-label">RAM</span><span class="stat-value" id="hw-ram">—</span></div>
+                    <div class="stat"><span class="stat-label">GPU Temp</span><span class="stat-value" id="hw-temp">—</span></div>
+                </div>
+            </div>
+            <div class="bar-container"><div class="bar-fill" id="vram-bar">VRAM</div></div>
+        </div>
+
+        <div class="card">
+            <h2>Recommended Models</h2>
+            <table class="rec-table">
+                <thead><tr><th>Model</th><th>Params</th><th>Quant</th><th>Mode</th><th>Est. VRAM</th></tr></thead>
+                <tbody id="rec-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        async function refresh() {
+            try {
+                const [status, temp] = await Promise.all([
+                    fetch('/api/status').then(r => r.json()),
+                    fetch('/api/gpu-temp').then(r => r.json()).catch(() => ({}))
+                ]);
+                // Model
+                document.getElementById('model-name').textContent = status.model || 'none';
+                // Context
+                const ctx = status.context || {};
+                const pct = ctx.usage_percent || 0;
+                document.getElementById('ctx-tokens').textContent = `${(ctx.total_tokens||0).toLocaleString()} / ${(ctx.context_window||0).toLocaleString()}`;
+                document.getElementById('ctx-messages').textContent = ctx.message_count || 0;
+                document.getElementById('ctx-compactions').textContent = ctx.compaction_count || 0;
+                const bar = document.getElementById('ctx-bar');
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+                bar.className = 'bar-fill ' + (pct > 80 ? 'bar-red' : pct > 50 ? 'bar-yellow' : 'bar-green');
+                // Hardware
+                const hw = status.hardware || {};
+                document.getElementById('hw-gpu').textContent = hw.gpu || 'unknown';
+                document.getElementById('hw-vram').textContent = `${(hw.vram_used_mb||0).toLocaleString()} / ${(hw.vram_total_mb||0).toLocaleString()} MB`;
+                document.getElementById('hw-rocm').textContent = hw.rocm_version || 'N/A';
+                document.getElementById('hw-ram').textContent = `${((hw.ram_total_mb||0)/1024).toFixed(1)} GB`;
+                // VRAM bar
+                const vramPct = hw.vram_total_mb ? Math.round(hw.vram_used_mb / hw.vram_total_mb * 100) : 0;
+                const vbar = document.getElementById('vram-bar');
+                vbar.style.width = vramPct + '%';
+                vbar.textContent = `VRAM ${vramPct}%`;
+                vbar.className = 'bar-fill ' + (vramPct > 80 ? 'bar-red' : vramPct > 50 ? 'bar-yellow' : 'bar-green');
+                // Temp
+                const tempVal = Object.values(temp).find(v => typeof v === 'object' && v['Temperature (Sensor edge) (C)']);
+                document.getElementById('hw-temp').textContent = tempVal ? tempVal['Temperature (Sensor edge) (C)'] + '°C' : 'N/A';
+                // Recommendations
+                const tbody = document.getElementById('rec-body');
+                tbody.innerHTML = '';
+                (status.recommendations || []).forEach(r => {
+                    const badge = r.mode === 'full_gpu' ? 'badge-gpu' : 'badge-hybrid';
+                    tbody.innerHTML += `<tr><td>${r.name}</td><td>${r.params}</td><td>${r.quant}</td><td><span class="badge ${badge}">${r.mode}</span></td><td>${r.estimated_vram_mb.toLocaleString()} MB</td></tr>`;
+                });
+            } catch (e) { console.error('Refresh failed:', e); }
+        }
+        async function switchModel() {
+            const path = document.getElementById('model-path').value;
+            if (!path) return;
+            const res = await fetch('/api/model', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model_path: path}) });
+            const data = await res.json();
+            alert(data.status || data.error);
+            refresh();
+        }
+        async function switchAPI() {
+            const provider = document.getElementById('api-provider').value;
+            const res = await fetch('/api/provider', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({provider}) });
+            const data = await res.json();
+            alert(data.status || data.error);
+            refresh();
+        }
+        refresh();
+        setInterval(refresh, 5000);
+    </script>
+</body>
+</html>

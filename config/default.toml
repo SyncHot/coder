@@ -1,0 +1,73 @@
+[app]
+name = "codator"
+version = "0.1.0"
+
+[inference]
+# Default local model path (GGUF format)
+model_path = ""
+# Context window size (tokens)
+context_size = 8192
+# Max tokens to generate
+max_tokens = 2048
+# Temperature
+temperature = 0.3
+# Number of GPU layers (-1 = all)
+n_gpu_layers = -1
+# Threads for CPU inference
+n_threads = 8
+
+[inference.models]
+# Preset model profiles
+[inference.models.fast]
+description = "Small model for summaries and quick tasks"
+recommended_quant = "Q4_K_M"
+max_params = "3B"
+
+[inference.models.balanced]
+description = "Medium model for general coding"
+recommended_quant = "Q8_0"
+max_params = "14B"
+
+[inference.models.powerful]
+description = "Large model with CPU offload"
+recommended_quant = "Q4_K_M"
+max_params = "34B"
+
+[context]
+# Compaction threshold (fraction of context window)
+compaction_threshold = 0.80
+# Number of recent messages to keep after compaction
+keep_last_messages = 2
+# Model to use for generating summaries (small/fast)
+summary_model = "fast"
+
+[api]
+# Cloud API provider: "claude", "openai", or "none"
+provider = "none"
+# API keys (prefer env vars: ANTHROPIC_API_KEY, OPENAI_API_KEY)
+claude_api_key = ""
+openai_api_key = ""
+claude_model = "claude-sonnet-4-20250514"
+openai_model = "gpt-4o"
+
+[web]
+host = "0.0.0.0"
+port = 8000
+
+[project]
+# File extensions to index
+index_extensions = [
+    ".py", ".js", ".ts", ".jsx", ".tsx",
+    ".rs", ".go", ".c", ".cpp", ".h",
+    ".java", ".rb", ".php", ".sh",
+    ".toml", ".yaml", ".yml", ".json",
+    ".md", ".txt"
+]
+# Directories to exclude from indexing
+exclude_dirs = [
+    ".git", "__pycache__", "node_modules",
+    ".venv", "venv", "target", "build",
+    "dist", ".tox", ".mypy_cache"
+]
+# Max file size to index (bytes)
+max_file_size = 524288
