@@ -54,8 +54,6 @@ class SSHTool(Tool):
                       username: str = "", password: str = "",
                       key_path: str = "") -> ToolResult:
         """Establish SSH connection."""
-        paramiko = self._ensure_paramiko()
-
         h = host or self._host
         p = port or self._port
         u = username or self._username
@@ -64,6 +62,8 @@ class SSHTool(Tool):
 
         if not h or not u:
             return ToolResult(success=False, error="Host and username are required.")
+
+        paramiko = self._ensure_paramiko()
 
         loop = asyncio.get_running_loop()
 
