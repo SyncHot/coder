@@ -29,8 +29,10 @@ def safe_parse_json(raw: str) -> Any:
     Strategy (in order):
     1. Standard json.loads
     2. Fix invalid backslash escapes (\\n in code blocks, Windows paths, etc.)
-    3. dirtyjson (lenient parser that handles trailing commas, unquoted keys, etc.)
-    4. Extract first JSON object/array via regex, then retry steps 1-3
+    3. Fix unescaped quotes inside JSON string values (LLMs forget to escape
+       ``"`` when embedding code containing double quotes)
+    4. dirtyjson (lenient parser that handles trailing commas, unquoted keys, etc.)
+    5. Extract first JSON object/array via regex, then retry steps 1-4
     """
     text = PlanActVerifyAgent._strip_json_fences(raw)
 
@@ -69,25 +71,124 @@ def safe_parse_json(raw: str) -> Any:
     except json.JSONDecodeError:
         pass
 
-    # 3. dirtyjson (lenient)
+    # 3. Fix unescaped quotes — LLMs embed code like replace(",", ".") in
+    #    JSON strings, sometimes escaping some " but not others.  A " inside
+    #    a *value* string is only a real terminator if it is followed by valid
+    #    JSON structure (,"key": or } or ]).  Key strings are always short
+    #    and trusted.
+    def _fix_unescaped_quotes(s: str) -> str:
+        out: list[str] = []
+        i = 0
+        in_string = False
+        expect_key = False  # next string will be a key
+        is_key = False      # current string is a key
+
+        while i < len(s):
+            c = s[i]
+
+            if in_string:
+                if c == '\\' and i + 1 < len(s):
+                    out.append(s[i:i + 2])
+                    i += 2
+                    continue
+
+                if c == '"':
+                    if is_key:
+                        # Keys are simple identifiers — trust closing quote
+                        in_string = False
+                        out.append(c)
+                    elif _is_real_value_end(s, i):
+                        in_string = False
+                        out.append(c)
+                    else:
+                        out.append('\\"')
+                    i += 1
+                    continue
+
+                out.append(c)
+                i += 1
+            else:
+                if c in '{,':
+                    expect_key = True
+                elif c == ':':
+                    expect_key = False
+                elif c == '"':
+                    in_string = True
+                    is_key = expect_key
+                    expect_key = False
+
+                out.append(c)
+                i += 1
+
+        return "".join(out)
+
+    def _is_real_value_end(s: str, pos: int) -> bool:
+        """Return True if the ``"`` at *pos* ends a JSON value string.
+
+        Accepts only:
+        - end of input
+        - ``}`` or ``]`` (end of object/array)
+        - ``,`` then ``"somekey"`` then ``:`` (next key-value pair)
+        """
+        j = pos + 1
+        while j < len(s) and s[j] in ' \t\n\r':
+            j += 1
+
+        if j >= len(s):
+            return True
+
+        ch = s[j]
+        if ch in '}]':
+            return True
+        if ch == ',':
+            # Expect: , <ws> "key" <ws> :
+            k = j + 1
+            while k < len(s) and s[k] in ' \t\n\r':
+                k += 1
+            if k < len(s) and s[k] == '"':
+                # Find closing quote of the key (skip escaped quotes)
+                k += 1
+                while k < len(s):
+                    if s[k] == '\\' and k + 1 < len(s):
+                        k += 2
+                        continue
+                    if s[k] == '"':
+                        # Found end of key — check for ':'
+                        k += 1
+                        while k < len(s) and s[k] in ' \t\n\r':
+                            k += 1
+                        return k < len(s) and s[k] == ':'
+                    k += 1
+            return False
+
+        return False
+
+    for src in (text, fixed):
+        try:
+            return json.loads(_fix_unescaped_quotes(src))
+        except json.JSONDecodeError:
+            pass
+
+    # 4. dirtyjson (lenient)
     try:
         import dirtyjson
         return dirtyjson.loads(text)
     except Exception:
         pass
 
-    # 4. Extract first JSON object/array via regex
+    # 5. Extract first JSON object/array via regex
     m = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', text)
     if m:
         extracted = m.group(1)
-        try:
-            return json.loads(extracted)
-        except json.JSONDecodeError:
-            pass
-        try:
-            return json.loads(_fix_escapes(extracted))
-        except json.JSONDecodeError:
-            pass
+        for attempt in (extracted, _fix_escapes(extracted)):
+            try:
+                return json.loads(attempt)
+            except json.JSONDecodeError:
+                pass
+            try:
+                return json.loads(_fix_unescaped_quotes(attempt))
+            except json.JSONDecodeError:
+                pass
         try:
             import dirtyjson
             return dirtyjson.loads(extracted)
