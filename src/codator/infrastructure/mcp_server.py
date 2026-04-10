@@ -193,7 +193,8 @@ class MCPServer:
             raise TypeError(f"Unsupported URI scheme: {uri}")
 
         file_path = os.path.realpath(file_path)
-        if not file_path.startswith(self._project_root + os.sep) and file_path != self._project_root:
+        root = self._project_root
+        if not file_path.startswith(root + os.sep) and file_path != root:
             raise TypeError("Access denied: path outside project")
 
         if not os.path.isfile(file_path):
