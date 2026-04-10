@@ -47,8 +47,8 @@ class TestModelSelector:
         # Unknown model returns default
         assert ModelSelector.estimate_vram_mb("unknown-model:latest") > 0
 
-    def test_optimal_num_ctx(self):
-        ctx = ModelSelector.optimal_num_ctx(1000, "medium")
+    def test_optimal_num_ctx(self, selector: ModelSelector):
+        ctx = selector.optimal_num_ctx(1000, "medium")
         assert ctx >= 4_096
 
     def test_no_available_models_fallback(self):
