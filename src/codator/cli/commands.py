@@ -350,6 +350,18 @@ async def _handle_agent(arg: str, engine: ChatEngine) -> None:
         if result.verification.warnings:
             table.add_row("Warnings", "\n".join(result.verification.warnings[:5]))
         console.print(table)
+
+        # Show analysis summary if present
+        for action in result.actions:
+            if (
+                action.success
+                and action.step.action == "analyze"
+                and action.step.target == "summary"
+                and action.output
+            ):
+                from rich.markdown import Markdown
+                console.print()
+                console.print(Markdown(action.output))
     except Exception as exc:
         print_error(f"Agent failed: {exc}")
 

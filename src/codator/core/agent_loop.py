@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 VALID_ACTIONS = frozenset(
-    {"read_file", "edit_file", "create_file", "run_command", "delete_file"}
+    {"read_file", "edit_file", "create_file", "run_command", "delete_file",
+     "analyze"}
 )
 
 
@@ -76,14 +77,20 @@ Given a task and optional project context, return a JSON object with:
   "task": "<restate the task concisely>",
   "reasoning": "<brief explanation of your approach>",
   "steps": [
-    {"action": "<read_file|edit_file|create_file|run_command|delete_file>",
+    {"action": "<read_file|edit_file|create_file|run_command|delete_file|analyze>",
      "target": "<file path or shell command>",
      "description": "<what this step does>"}
   ]
 }
 
 Rules:
-- Only use the five allowed actions.
+- Only use the six allowed actions.
+- **ALWAYS start by reading the relevant files first** before editing or running commands.
+- If the task is a question, review, or analysis (e.g. "what can be improved",
+  "check this file", "review the code"), use only read_file and analyze actions.
+  Do NOT edit or run commands for analytical tasks.
+- The "analyze" action takes a file path as target and a description of what to
+  look for. It is read-only and produces observations — no changes.
 - File paths must be relative to the project root.
 - For edit_file the description MUST be a JSON string:
   {"file": "path", "old": "text to find", "new": "replacement text"}
@@ -215,6 +222,7 @@ class PlanActVerifyAgent:
                 "create_file": self._act_create_file,
                 "run_command": self._act_run_command,
                 "delete_file": self._act_delete_file,
+                "analyze": self._act_analyze,
             }.get(step.action)
             if handler is None:
                 raise ValueError(f"Unknown action: {step.action!r}")
@@ -231,7 +239,11 @@ class PlanActVerifyAgent:
         return path.read_text(encoding="utf-8")
 
     async def _act_edit_file(self, step: AgentStep) -> str:
-        edit_info = json.loads(step.description)
+        # Handle both JSON string and dict descriptions
+        if isinstance(step.description, dict):
+            edit_info = step.description
+        else:
+            edit_info = json.loads(step.description)
         file_rel = edit_info.get("file", step.target)
         old_text: str = edit_info["old"]
         new_text: str = edit_info["new"]
@@ -276,6 +288,17 @@ class PlanActVerifyAgent:
         shutil.copy2(path, backup)
         path.unlink()
         return f"Deleted {step.target} (backup at {backup.name})"
+
+    async def _act_analyze(self, step: AgentStep) -> str:
+        """Read-only analysis: read the file and return its content for review."""
+        path = self._safe_path(step.target)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        content = path.read_text(encoding="utf-8")
+        # Truncate very large files for analysis
+        if len(content) > 15000:
+            content = content[:15000] + f"\n... [truncated, total {len(content)} chars]"
+        return f"=== {step.target} ===\n{content}"
 
     # -- verify --------------------------------------------------------------
 
@@ -425,6 +448,12 @@ class PlanActVerifyAgent:
         all_actions: list[ActionResult] = []
         heal_iterations = 0
 
+        # Detect analysis-only plans (no edits/creates/deletes/commands)
+        _mutating_actions = {"edit_file", "create_file", "delete_file", "run_command"}
+        is_analysis_only = not any(
+            s.action in _mutating_actions for s in current_plan.steps
+        )
+
         for iteration in range(1 + self._max_heal):
             # ---- Act -------------------------------------------------------
             for step in current_plan.steps:
@@ -438,7 +467,55 @@ class PlanActVerifyAgent:
                         "Step %d failed: %s", step.index, result.error
                     )
 
-            # ---- Verify ----------------------------------------------------
+            # ---- Verify (skip for read-only analysis) ----------------------
+            if is_analysis_only:
+                # Gather all analysis outputs as the "result"
+                analysis_output = "\n".join(
+                    a.output for a in all_actions if a.success and a.output
+                )
+                verification = VerifyResult(success=True)
+                await _notify("Analysis complete", "done")
+
+                # Generate a summary response from the model
+                summary_prompt = (
+                    f"Based on your analysis of the code, answer the user's "
+                    f"original question:\n\n{task}\n\n"
+                    f"Here is what you found:\n{analysis_output[:8000]}"
+                )
+                try:
+                    summary = await self._ollama_chat(
+                        "You are a helpful coding assistant. Provide a clear, "
+                        "actionable review of the code. Be specific about what "
+                        "is good and what should be improved.",
+                        summary_prompt,
+                    )
+                    # Parse JSON response (model may wrap in JSON due to format)
+                    try:
+                        parsed = json.loads(summary)
+                        summary = parsed.get("response", parsed.get("answer", str(parsed)))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    all_actions.append(ActionResult(
+                        step=AgentStep(
+                            index=len(all_actions),
+                            action="analyze",
+                            target="summary",
+                            description="Analysis summary",
+                            status="done",
+                        ),
+                        success=True, output=summary, error="",
+                    ))
+                except Exception as exc:
+                    logger.warning("Summary generation failed: %s", exc)
+
+                return AgentResult(
+                    plan=current_plan,
+                    actions=all_actions,
+                    verification=verification,
+                    heal_iterations=0,
+                    final_success=True,
+                )
+
             await _notify("Verifying…", "running")
             verification = await self.verify()
             await _notify(
