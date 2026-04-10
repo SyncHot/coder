@@ -9,6 +9,7 @@ Tests for:
 """
 
 from __future__ import annotations
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,7 +17,6 @@ import pytest
 from codator.config import ContextConfig
 from codator.core.context_manager import AdaptiveContextManager
 from codator.domain.models import Message, Role
-
 
 # ---------------------------------------------------------------------------
 # Helpers

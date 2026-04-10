@@ -17,7 +17,6 @@ import pytest
 
 from codator.domain.models import FileInfo, ProjectMap, Symbol, SymbolKind
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

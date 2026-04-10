@@ -9,13 +9,13 @@ Tests for:
 """
 
 from __future__ import annotations
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from codator.domain.models import HardwareInfo, InferenceMode
 from codator.infrastructure.hardware import AMDHardwareProbe
-
 
 # ---------------------------------------------------------------------------
 # Helpers

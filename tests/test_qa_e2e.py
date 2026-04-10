@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ===================================================================
 # 1. AGENT LOOP — PLAN PARSING
 # ===================================================================
@@ -376,7 +375,7 @@ class TestE2EScenario:
     @pytest.mark.asyncio
     async def test_full_agent_workflow_mocked(self):
         """Simulate the complete agent workflow with mocks."""
-        from codator.core.agent_loop import PlanActVerifyAgent, AgentStep
+        from codator.core.agent_loop import AgentStep, PlanActVerifyAgent
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Setup: create a project with a bug

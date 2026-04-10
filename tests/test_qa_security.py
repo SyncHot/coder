@@ -19,7 +19,6 @@ import pytest
 
 from codator.domain.models import ToolCall
 
-
 # ===================================================================
 # 1. TERMINAL TOOL — PROMPT INJECTION ATTACKS
 # ===================================================================

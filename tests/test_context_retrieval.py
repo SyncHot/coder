@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from codator.core.context_retrieval import ContextualIndex, CodeChunk
+from codator.core.context_retrieval import CodeChunk, ContextualIndex
 
 
 @pytest.fixture()
