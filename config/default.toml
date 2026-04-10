@@ -42,8 +42,8 @@ keep_last_messages = 2
 summary_model = "fast"
 
 [api]
-# Cloud API provider: "claude", "openai", or "none"
-provider = "none"
+# Cloud API provider: "claude", "openai", "ollama", or "none"
+provider = "ollama"
 # API keys (prefer env vars: ANTHROPIC_API_KEY, OPENAI_API_KEY)
 claude_api_key = ""
 openai_api_key = ""
