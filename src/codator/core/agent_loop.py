@@ -12,6 +12,8 @@ from pathlib import Path
 
 import httpx
 
+from codator.infrastructure.tools.terminal_tool import TerminalTool
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -123,6 +125,11 @@ class PlanActVerifyAgent:
         self._model = model
         self._project_root = Path(project_root).resolve()
         self._max_heal = max_heal_iterations
+        self._terminal = TerminalTool(
+            working_dir=str(self._project_root),
+            timeout=60,
+            require_confirm=True,
+        )
 
     # -- helpers -------------------------------------------------------------
 
@@ -253,27 +260,12 @@ class PlanActVerifyAgent:
         return f"Created {step.target}"
 
     async def _act_run_command(self, step: AgentStep) -> str:
-        proc = await asyncio.create_subprocess_shell(
-            step.target,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(self._project_root),
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-        except TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            raise TimeoutError(
-                f"Command timed out after 60s: {step.target!r}"
-            )
-        output = stdout.decode(errors="replace")
-        err = stderr.decode(errors="replace")
-        if proc.returncode != 0:
+        result = await self._terminal.run_command(step.target, timeout=60)
+        if not result.success:
             raise RuntimeError(
-                f"Command exited {proc.returncode}:\n{err or output}"
+                f"Command failed: {result.error or result.output}"
             )
-        return output + err
+        return (result.output or "") + (result.error or "")
 
     async def _act_delete_file(self, step: AgentStep) -> str:
         path = self._safe_path(step.target)
@@ -341,17 +333,11 @@ class PlanActVerifyAgent:
         return errors, warnings
 
     async def _run_quiet(self, cmd: str) -> str | None:
-        """Run *cmd* and return combined output, or None on execution error."""
+        """Run *cmd* via sandboxed TerminalTool and return combined output."""
         try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(self._project_root),
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
-            return stdout.decode(errors="replace")
-        except (TimeoutError, OSError) as exc:
+            result = await self._terminal.run_command(cmd, timeout=120)
+            return (result.output or "") + (result.error or "")
+        except Exception as exc:
             logger.warning("Verification command %r failed: %s", cmd, exc)
             return None
 

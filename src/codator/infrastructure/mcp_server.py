@@ -35,7 +35,7 @@ class MCPServer:
     """MCP server that exposes codator's tools over JSON-RPC stdio transport."""
 
     def __init__(self, project_root: str = ".") -> None:
-        self._project_root = os.path.abspath(project_root)
+        self._project_root = os.path.realpath(project_root)
         self._tools: dict[str, Tool] = {}
         self._register_tools()
 
@@ -49,7 +49,7 @@ class MCPServer:
             ListDirectoryTool(self._project_root),
             WriteFileTool(self._project_root),
             EditFileTool(self._project_root),
-            TerminalTool(working_dir=self._project_root, require_confirm=False),
+            TerminalTool(working_dir=self._project_root, require_confirm=True),
         ]
         for tool in tools:
             self._tools[tool.name] = tool
@@ -192,8 +192,8 @@ class MCPServer:
         else:
             raise TypeError(f"Unsupported URI scheme: {uri}")
 
-        file_path = os.path.normpath(file_path)
-        if not file_path.startswith(self._project_root):
+        file_path = os.path.realpath(file_path)
+        if not file_path.startswith(self._project_root + os.sep) and file_path != self._project_root:
             raise TypeError("Access denied: path outside project")
 
         if not os.path.isfile(file_path):

@@ -18,7 +18,7 @@ class ReadFileTool(Tool):
     """Read file contents from the project directory."""
 
     def __init__(self, project_root: str = "."):
-        self._root = os.path.abspath(project_root)
+        self._root = os.path.realpath(project_root)
 
     @property
     def name(self) -> str:
@@ -46,8 +46,8 @@ class ReadFileTool(Tool):
         if not path:
             return ToolResult(success=False, error="No path provided.")
 
-        full = os.path.normpath(os.path.join(self._root, path))
-        if not full.startswith(self._root):
+        full = os.path.realpath(os.path.join(self._root, path))
+        if not full.startswith(self._root + os.sep) and full != self._root:
             return ToolResult(success=False, error="Access denied: path outside project.")
 
         if not os.path.isfile(full):
@@ -72,7 +72,7 @@ class WriteFileTool(Tool):
     """Write or update file contents in the project directory."""
 
     def __init__(self, project_root: str = "."):
-        self._root = os.path.abspath(project_root)
+        self._root = os.path.realpath(project_root)
 
     @property
     def name(self) -> str:
@@ -108,8 +108,8 @@ class WriteFileTool(Tool):
         if not path:
             return ToolResult(success=False, error="No path provided.")
 
-        full = os.path.normpath(os.path.join(self._root, path))
-        if not full.startswith(self._root):
+        full = os.path.realpath(os.path.join(self._root, path))
+        if not full.startswith(self._root + os.sep) and full != self._root:
             return ToolResult(success=False, error="Access denied: path outside project.")
 
         try:
@@ -135,7 +135,7 @@ class EditFileTool(Tool):
     """Apply a search-and-replace edit to a file in the project."""
 
     def __init__(self, project_root: str = "."):
-        self._root = os.path.abspath(project_root)
+        self._root = os.path.realpath(project_root)
 
     @property
     def name(self) -> str:
@@ -178,8 +178,8 @@ class EditFileTool(Tool):
         if not old_text:
             return ToolResult(success=False, error="No old_text provided.")
 
-        full = os.path.normpath(os.path.join(self._root, path))
-        if not full.startswith(self._root):
+        full = os.path.realpath(os.path.join(self._root, path))
+        if not full.startswith(self._root + os.sep) and full != self._root:
             return ToolResult(success=False, error="Access denied: path outside project.")
 
         if not os.path.isfile(full):
@@ -222,7 +222,7 @@ class ListDirectoryTool(Tool):
     """List files and directories in the project."""
 
     def __init__(self, project_root: str = "."):
-        self._root = os.path.abspath(project_root)
+        self._root = os.path.realpath(project_root)
 
     @property
     def name(self) -> str:
@@ -249,8 +249,8 @@ class ListDirectoryTool(Tool):
 
     async def execute(self, **kwargs) -> ToolResult:
         path = kwargs.get("path", ".")
-        full = os.path.normpath(os.path.join(self._root, path))
-        if not full.startswith(self._root):
+        full = os.path.realpath(os.path.join(self._root, path))
+        if not full.startswith(self._root + os.sep) and full != self._root:
             return ToolResult(success=False, error="Access denied: path outside project.")
 
         if not os.path.isdir(full):

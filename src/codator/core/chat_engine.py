@@ -353,9 +353,9 @@ class ChatEngine:
                 ).strip()
                 if not text:
                     text = (
-                        "Przeanalizowałem dostępne informacje, ale nie znalazłem "
-                        "pliku o nazwie 'builder' w projekcie. Czy możesz uściślić, "
-                        "który moduł masz na myśli?"
+                        "I analyzed the available information but could not find "
+                        "the specific file or module. Could you clarify which "
+                        "part of the project you mean?"
                     )
                 yield text
                 self._context.add_message(

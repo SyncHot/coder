@@ -89,10 +89,11 @@ async def async_main():
 
         from codator.web.app import create_app
         app = create_app(engine)
-        uv_config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
+        web_cfg = engine._settings.web
+        uv_config = uvicorn.Config(app, host=web_cfg.host, port=web_cfg.port, log_level="warning")
         server = uvicorn.Server(uv_config)
         asyncio.create_task(server.serve())
-        print_info("Web dashboard: http://localhost:8000")
+        print_info(f"Web dashboard: http://{web_cfg.host}:{web_cfg.port}")
 
     # Interactive prompt session
     session: PromptSession = PromptSession(

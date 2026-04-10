@@ -70,14 +70,15 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
             console.print(git_ctx.get_work_context())
 
         case "/web":
-            print_info("Starting web dashboard on http://localhost:8000 ...")
+            web_cfg = engine._settings.web
+            print_info(f"Starting web dashboard on http://{web_cfg.host}:{web_cfg.port} ...")
             import asyncio
 
             import uvicorn
 
             from codator.web.app import create_app
             app = create_app(engine)
-            config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
+            config = uvicorn.Config(app, host=web_cfg.host, port=web_cfg.port, log_level="warning")
             server = uvicorn.Server(config)
             asyncio.create_task(server.serve())
             print_info("Web dashboard running in background.")

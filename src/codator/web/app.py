@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 if TYPE_CHECKING:
     from codator.core.chat_engine import ChatEngine
@@ -15,11 +17,35 @@ if TYPE_CHECKING:
 _engine: ChatEngine | None = None
 
 
+class TokenAuthMiddleware(BaseHTTPMiddleware):
+    """Simple bearer-token auth middleware. Skipped when token is empty."""
+
+    def __init__(self, app: FastAPI, token: str) -> None:
+        super().__init__(app)
+        self._token = token
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        if not self._token:
+            return await call_next(request)
+        auth = request.headers.get("Authorization", "")
+        if auth == f"Bearer {self._token}":
+            return await call_next(request)
+        # Allow dashboard HTML without auth for browser convenience
+        if request.url.path in ("/", "/static/index.html"):
+            return await call_next(request)
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+
 def create_app(engine: ChatEngine) -> FastAPI:
     global _engine
     _engine = engine
 
     app = FastAPI(title="codator Dashboard", version="0.1.0")
+
+    # Auth middleware (active only when auth_token is set in config)
+    auth_token = engine._settings.web.auth_token
+    if auth_token:
+        app.add_middleware(TokenAuthMiddleware, token=auth_token)
 
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
