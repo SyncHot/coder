@@ -28,6 +28,103 @@ def print_assistant(text: str):
     console.print()
 
 
+class StreamingMarkdownRenderer:
+    """Buffers streaming tokens and renders code blocks with syntax highlighting."""
+
+    def __init__(self) -> None:
+        self._buffer: list[str] = []
+        self._in_code_block = False
+        self._code_lang = ""
+        self._code_lines: list[str] = []
+
+    def feed(self, token: str) -> None:
+        """Feed a token. Renders immediately or buffers code blocks."""
+        self._buffer.append(token)
+        text = "".join(self._buffer)
+
+        if self._in_code_block:
+            # Check for closing fence
+            if "\n```" in text or text.rstrip().endswith("```"):
+                # Find where the closing ``` is
+                lines = text.split("\n")
+                code_lines: list[str] = []
+                closed = False
+                for line in lines:
+                    if line.strip() == "```" and code_lines:
+                        closed = True
+                        break
+                    code_lines.append(line)
+                if closed:
+                    code = "\n".join(code_lines)
+                    from rich.syntax import Syntax
+                    lang = self._code_lang or "text"
+                    console.print()
+                    console.print(Syntax(
+                        code, lang, theme="monokai",
+                        line_numbers=True, word_wrap=True,
+                    ))
+                    self._in_code_block = False
+                    self._code_lang = ""
+                    self._buffer.clear()
+                    # Print anything after the closing fence
+                    idx = text.find("\n```")
+                    rest = text[idx + 4:]  # skip \n```
+                    rest_nl = rest.find("\n")
+                    if rest_nl >= 0:
+                        rest = rest[rest_nl + 1:]
+                        if rest:
+                            console.print(rest, end="", highlight=False)
+            return
+
+        # Check if we're entering a code block
+        if "```" in text:
+            # Split on the fence
+            before, _, after = text.partition("```")
+            if before:
+                console.print(before, end="", highlight=False)
+            # Extract language hint
+            nl = after.find("\n")
+            if nl >= 0:
+                self._code_lang = after[:nl].strip()
+                self._buffer.clear()
+                self._buffer.append(after[nl + 1:])
+            else:
+                self._code_lang = after.strip()
+                self._buffer.clear()
+            self._in_code_block = True
+            return
+
+        # Normal text — flush complete lines immediately
+        if "\n" in text:
+            last_nl = text.rfind("\n")
+            console.print(text[:last_nl + 1], end="", highlight=False)
+            self._buffer.clear()
+            remainder = text[last_nl + 1:]
+            if remainder:
+                self._buffer.append(remainder)
+        elif len(text) > 200:
+            # Flush long buffered text
+            console.print(text, end="", highlight=False)
+            self._buffer.clear()
+
+    def flush(self) -> None:
+        """Flush any remaining buffered content."""
+        if self._buffer:
+            text = "".join(self._buffer)
+            if self._in_code_block:
+                from rich.syntax import Syntax
+                lang = self._code_lang or "text"
+                console.print()
+                console.print(Syntax(
+                    text, lang, theme="monokai",
+                    line_numbers=True, word_wrap=True,
+                ))
+            else:
+                console.print(text, end="", highlight=False)
+            self._buffer.clear()
+            self._in_code_block = False
+
+
 def print_streaming_token(token: str):
     """Print a single token without newline (for streaming)."""
     console.print(token, end="", highlight=False)
@@ -117,6 +214,7 @@ def print_help():
 | `/save [name]` | Save current conversation |
 | `/load <id>` | Load a saved conversation |
 | `/history` | List saved conversations |
+| `/undo [file]` | Restore file(s) from .bak backups |
 """
     console.print(Markdown(help_text))
 

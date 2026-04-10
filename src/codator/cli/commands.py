@@ -116,6 +116,9 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
         case "/history":
             await _handle_history(engine)
 
+        case "/undo":
+            await _handle_undo(arg, engine)
+
         case _:
             print_error(f"Unknown command: {command}. Type /help for available commands.")
 
@@ -552,3 +555,57 @@ async def _handle_history(engine: ChatEngine) -> None:
         print_error(f"History failed: {exc}")
     finally:
         store.close()
+
+
+async def _handle_undo(arg: str, engine: ChatEngine) -> None:
+    """Restore files from .bak backups: /undo [file] or /undo --list."""
+    import os
+
+    project_root = engine._settings.project_root
+
+    if arg.strip() == "--list":
+        bak_files: list[str] = []
+        for root, _dirs, files in os.walk(project_root):
+            for f in files:
+                if f.endswith(".bak"):
+                    rel = os.path.relpath(
+                        os.path.join(root, f), project_root,
+                    )
+                    bak_files.append(rel)
+        if not bak_files:
+            print_info("No .bak backup files found.")
+        else:
+            from rich.table import Table
+            table = Table(title="Backup Files", border_style="yellow")
+            table.add_column("Backup", style="bold")
+            table.add_column("Restores to")
+            for b in sorted(bak_files):
+                table.add_row(b, b.removesuffix(".bak"))
+            console.print(table)
+        return
+
+    if not arg.strip():
+        restored = 0
+        for root, _dirs, files in os.walk(project_root):
+            for f in files:
+                if f.endswith(".bak"):
+                    bak = os.path.join(root, f)
+                    orig = bak.removesuffix(".bak")
+                    os.replace(bak, orig)
+                    restored += 1
+        if restored:
+            print_info(f"Restored {restored} file(s) from .bak backups.")
+        else:
+            print_info("No .bak backup files found.")
+        return
+
+    target = os.path.realpath(os.path.join(project_root, arg.strip()))
+    if not target.startswith(os.path.realpath(project_root) + os.sep):
+        print_error("Path outside project root.")
+        return
+    bak = target + ".bak"
+    if not os.path.isfile(bak):
+        print_error(f"No backup found: {arg}.bak")
+        return
+    os.replace(bak, target)
+    print_info(f"Restored {arg} from backup.")

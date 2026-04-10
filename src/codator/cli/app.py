@@ -12,11 +12,11 @@ from prompt_toolkit.history import InMemoryHistory
 
 from codator.cli.commands import handle_command
 from codator.cli.rendering import (
+    StreamingMarkdownRenderer,
     console,
     print_compaction_notice,
     print_error,
     print_info,
-    print_streaming_token,
     print_welcome,
 )
 from codator.config import load_config
@@ -31,7 +31,7 @@ COMMANDS = [
     "/clear", "/hardware", "/index", "/git", "/web",
     "/ssh", "/browser", "/terminal", "/ollama",
     "/agent", "/gpu", "/memory", "/mcp",
-    "/save", "/load", "/history",
+    "/save", "/load", "/history", "/undo",
 ]
 command_completer = WordCompleter(COMMANDS, sentence=True)
 
@@ -144,11 +144,13 @@ async def async_main():
             try:
                 console.print("[bold green]codator>[/bold green] ", end="")
                 full_response: list[str] = []
+                renderer = StreamingMarkdownRenderer()
 
                 async for token in engine.chat_stream(user_input):
-                    print_streaming_token(token)
+                    renderer.feed(token)
                     full_response.append(token)
 
+                renderer.flush()
                 console.print()  # newline after streaming
 
                 # Check if compaction happened
