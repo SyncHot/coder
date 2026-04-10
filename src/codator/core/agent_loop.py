@@ -368,8 +368,14 @@ class PlanActVerifyAgent:
         task: str,
         project_context: str = "",
         on_step: Callable[[str, str], object] | None = None,
+        use_git_transaction: bool = True,
     ) -> AgentResult:
-        """Execute the full Plan → Act → Verify (→ Heal) cycle."""
+        """Execute the full Plan → Act → Verify (→ Heal) cycle.
+
+        When *use_git_transaction* is True and the project is a git repo,
+        all changes are made on a temporary branch.  On success the branch
+        is merged back; on failure it is rolled back automatically.
+        """
 
         async def _notify(description: str, status: str) -> None:
             if on_step is not None:
@@ -377,6 +383,40 @@ class PlanActVerifyAgent:
                 if asyncio.iscoroutine(result):
                     await result
 
+        # ---- Git transaction setup -----------------------------------------
+        original_branch: str | None = None
+        agent_branch: str | None = None
+
+        if use_git_transaction:
+            original_branch, agent_branch = self._git_create_branch()
+
+        try:
+            agent_result = await self._run_inner(
+                task, project_context, _notify,
+            )
+        except Exception:
+            if agent_branch and original_branch:
+                self._git_rollback(original_branch, agent_branch)
+            raise
+
+        # ---- Git transaction commit/rollback -------------------------------
+        if agent_branch and original_branch:
+            if agent_result.final_success:
+                self._git_merge(original_branch, agent_branch)
+                await _notify("Git: merged agent branch", "done")
+            else:
+                self._git_rollback(original_branch, agent_branch)
+                await _notify("Git: rolled back agent branch", "done")
+
+        return agent_result
+
+    async def _run_inner(
+        self,
+        task: str,
+        project_context: str,
+        _notify: Callable,
+    ) -> AgentResult:
+        """Core agent loop (extracted for git transaction wrapping)."""
         # ---- Plan ----------------------------------------------------------
         await _notify("Planning…", "started")
         current_plan = await self.plan(task, project_context)
@@ -436,3 +476,97 @@ class PlanActVerifyAgent:
             heal_iterations=heal_iterations,
             final_success=False,
         )
+
+    # ---- Git transaction helpers -------------------------------------------
+
+    def _git_create_branch(self) -> tuple[str | None, str | None]:
+        """Create agent branch. Returns (original_branch, agent_branch)."""
+        import subprocess
+        import time
+
+        try:
+            original = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(self._project_root),
+                capture_output=True, text=True, timeout=5,
+            )
+            if original.returncode != 0:
+                return None, None
+            orig_branch = original.stdout.strip()
+
+            agent_branch = f"codator/agent-{int(time.time())}"
+            subprocess.run(
+                ["git", "checkout", "-b", agent_branch],
+                cwd=str(self._project_root),
+                capture_output=True, text=True, timeout=5,
+                check=True,
+            )
+            logger.info("Created agent branch: %s", agent_branch)
+            return orig_branch, agent_branch
+        except Exception as exc:
+            logger.debug("Git branch creation failed: %s", exc)
+            return None, None
+
+    def _git_merge(
+        self, original_branch: str, agent_branch: str,
+    ) -> None:
+        """Merge agent branch back and clean up."""
+        import subprocess
+
+        try:
+            # Commit any uncommitted changes on agent branch
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=str(self._project_root),
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"codator agent: auto-commit from {agent_branch}",
+                 "--allow-empty"],
+                cwd=str(self._project_root),
+                capture_output=True, timeout=5,
+            )
+            # Switch back and merge
+            subprocess.run(
+                ["git", "checkout", original_branch],
+                cwd=str(self._project_root),
+                capture_output=True, timeout=5, check=True,
+            )
+            subprocess.run(
+                ["git", "merge", "--no-ff", agent_branch,
+                 "-m", f"Merge codator agent work ({agent_branch})"],
+                cwd=str(self._project_root),
+                capture_output=True, timeout=10, check=True,
+            )
+            subprocess.run(
+                ["git", "branch", "-d", agent_branch],
+                cwd=str(self._project_root),
+                capture_output=True, timeout=5,
+            )
+            logger.info("Merged agent branch %s into %s",
+                        agent_branch, original_branch)
+        except Exception as exc:
+            logger.error("Git merge failed: %s", exc)
+
+    def _git_rollback(
+        self, original_branch: str, agent_branch: str,
+    ) -> None:
+        """Discard agent branch and return to original."""
+        import subprocess
+
+        try:
+            # Discard all changes
+            subprocess.run(
+                ["git", "checkout", "--force", original_branch],
+                cwd=str(self._project_root),
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["git", "branch", "-D", agent_branch],
+                cwd=str(self._project_root),
+                capture_output=True, timeout=5,
+            )
+            logger.info("Rolled back agent branch %s", agent_branch)
+        except Exception as exc:
+            logger.error("Git rollback failed: %s", exc)
