@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -408,12 +409,31 @@ class ChatEngine:
                 return
 
             # Detect repeated tool calls (loop prevention)
+            # Normalize paths in parameters to catch ./ vs .// vs ./// etc.
+            def _normalize_params(params: dict) -> dict:
+                normalized = {}
+                for k, v in params.items():
+                    if isinstance(v, str) and ("/" in v or v == "."):
+                        # Normalize path-like values
+                        v = os.path.normpath(v)
+                    normalized[k] = v
+                return normalized
+
             call_keys = frozenset(
-                f"{tc.tool_name}:{json.dumps(tc.parameters, sort_keys=True)}"
+                f"{tc.tool_name}:{json.dumps(_normalize_params(tc.parameters), sort_keys=True)}"
                 for tc in tool_calls
             )
             new_calls = call_keys - seen_calls
-            if not new_calls:
+
+            # Also detect same-tool repetition: if the model has called the
+            # same tool name 3+ times (even with different params), and the
+            # latest call returns the same result, it's likely looping.
+            same_tool_count = sum(
+                1 for sc in seen_calls
+                if sc.split(":", 1)[0] in {tc.tool_name for tc in tool_calls}
+            )
+
+            if not new_calls or same_tool_count >= 3:
                 # All calls are repeats — force a text response
                 logger.warning("Loop detected: model repeating same tool calls, forcing answer")
                 force_msg = Message(
