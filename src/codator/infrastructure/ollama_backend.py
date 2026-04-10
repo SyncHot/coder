@@ -19,10 +19,13 @@ logger = logging.getLogger(__name__)
 class OllamaBackend(InferenceBackend):
     """Inference backend using Ollama's local API (OpenAI-compatible)."""
 
-    def __init__(self, settings: AppSettings | None = None, model: str = ""):
+    def __init__(
+        self, settings: AppSettings | None = None, model: str = "", num_ctx: int = 0,
+    ):
         self._settings = settings or get_settings()
         self._model = model or self._settings.ollama.model
         self._base_url = self._settings.ollama.base_url.rstrip("/")
+        self._num_ctx = num_ctx
         self._client = None
 
     def _ensure_client(self):
@@ -74,6 +77,8 @@ class OllamaBackend(InferenceBackend):
         }
         if tools:
             kwargs["tools"] = tools
+        if self._num_ctx:
+            kwargs["extra_body"] = {"num_ctx": self._num_ctx}
 
         t0 = time.perf_counter()
         response = await self._client.chat.completions.create(**kwargs)
@@ -111,13 +116,17 @@ class OllamaBackend(InferenceBackend):
         self._ensure_client()
         prepared = self._prepare_messages(messages)
 
-        stream = await self._client.chat.completions.create(
-            model=self._model,
-            messages=prepared,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stream=True,
-        )
+        stream_kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": prepared,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if self._num_ctx:
+            stream_kwargs["extra_body"] = {"num_ctx": self._num_ctx}
+
+        stream = await self._client.chat.completions.create(**stream_kwargs)
         async for chunk in stream:
             delta = chunk.choices[0].delta
             if delta and delta.content:

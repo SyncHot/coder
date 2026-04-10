@@ -110,6 +110,8 @@ def print_help():
 | `/browser <action>` | Browser tool (launch/navigate/click/screenshot/close) |
 | `/terminal <cmd>` | Run a local shell command (sandboxed) |
 | `/ollama [list\\|use <model>]` | List/switch Ollama models |
+| `/agent <task>` | Run Plan-Act-Verify agent cycle |
+| `/gpu` | Show GPU/VRAM & Ollama stats |
 """
     console.print(Markdown(help_text))
 

@@ -10,7 +10,9 @@ from typing import Any
 
 from codator.config import AppSettings, get_settings
 from codator.core.context_manager import AdaptiveContextManager
+from codator.core.context_retrieval import ContextualIndex
 from codator.core.git_integration import GitContext
+from codator.core.model_selector import ModelSelector
 from codator.core.project_indexer import TreeSitterProjectIndexer
 from codator.core.tool_registry import ToolRegistry
 from codator.domain.interfaces import InferenceBackend
@@ -26,7 +28,12 @@ from codator.infrastructure.api_clients import ClaudeBackend, OpenAIBackend
 from codator.infrastructure.inference import DummyBackend, LlamaCppBackend
 from codator.infrastructure.ollama_backend import OllamaBackend
 from codator.infrastructure.tools.browser_tool import BrowserTool
-from codator.infrastructure.tools.file_tool import ListDirectoryTool, ReadFileTool
+from codator.infrastructure.tools.file_tool import (
+    EditFileTool,
+    ListDirectoryTool,
+    ReadFileTool,
+    WriteFileTool,
+)
 from codator.infrastructure.tools.ssh_tool import SSHTool
 from codator.infrastructure.tools.terminal_tool import TerminalTool
 
@@ -68,6 +75,8 @@ class ChatEngine:
         self._project_map: ProjectMap | None = None
         self._active_model: str = ""
         self._tools = ToolRegistry()
+        self._model_selector: ModelSelector | None = None
+        self._contextual_index: ContextualIndex | None = None
 
     # ----- Lifecycle -----
 
@@ -90,6 +99,18 @@ class ChatEngine:
         else:
             self._try_api_backend()
 
+        # Initialize model selector for Ollama
+        if isinstance(self._backend, OllamaBackend):
+            await self._init_model_selector()
+
+        # Initialize contextual index
+        try:
+            self._contextual_index = ContextualIndex(self._project_root)
+            chunk_count = await self._contextual_index.index_project()
+            logger.info("Contextual index: %d chunks", chunk_count)
+        except Exception as exc:
+            logger.warning("Contextual indexing failed: %s", exc)
+
         # Register agentic tools
         self._register_tools()
 
@@ -104,6 +125,19 @@ class ChatEngine:
         # System prompt with project + git context
         sys_prompt = self._build_system_prompt()
         self._context.add_message(Message(role=Role.SYSTEM, content=sys_prompt))
+
+    async def _init_model_selector(self) -> None:
+        """Set up hardware-aware model selector using Ollama model list."""
+        try:
+            assert isinstance(self._backend, OllamaBackend)
+            models = await self._backend.list_models()
+            if models:
+                self._model_selector = ModelSelector(models)
+                logger.info(
+                    "Model selector initialized with %d models", len(models)
+                )
+        except Exception as exc:
+            logger.warning("Model selector init failed: %s", exc)
 
     def _try_api_backend(self):
         provider = self._settings.api.provider
@@ -124,6 +158,8 @@ class ChatEngine:
         # File tools (always available)
         self._tools.register(ReadFileTool(project_root=self._project_root))
         self._tools.register(ListDirectoryTool(project_root=self._project_root))
+        self._tools.register(WriteFileTool(project_root=self._project_root))
+        self._tools.register(EditFileTool(project_root=self._project_root))
 
         # Terminal tool
         terminal = TerminalTool(
@@ -202,7 +238,33 @@ class ChatEngine:
         """Send a user message and stream the response, with agentic tool calling."""
         assert self._context is not None, "Call initialize() first"
 
-        user_msg = Message(role=Role.USER, content=user_input)
+        # Auto-select model if model selector is available
+        if self._model_selector and isinstance(self._backend, OllamaBackend):
+            current_tokens = self._context.total_tokens()
+            choice = self._model_selector.select_model(user_input, current_tokens)
+            if choice.model_name != self._active_model:
+                await self._backend.close()
+                self._backend = OllamaBackend(
+                    self._settings, model=choice.model_name, num_ctx=choice.num_ctx,
+                )
+                self._active_model = choice.model_name
+                logger.info("Auto-switched to %s (num_ctx=%d)", choice.model_name, choice.num_ctx)
+
+        # Inject relevant code context from contextual index
+        context_block = ""
+        if self._contextual_index:
+            try:
+                chunks = self._contextual_index.search(user_input, top_k=3)
+                if chunks:
+                    context_block = self._contextual_index.format_chunks_for_prompt(chunks)
+            except Exception as exc:
+                logger.debug("Contextual search failed: %s", exc)
+
+        enriched_input = user_input
+        if context_block:
+            enriched_input = f"{user_input}\n\n{context_block}"
+
+        user_msg = Message(role=Role.USER, content=enriched_input)
         self._context.add_message(user_msg)
 
         await self._context.maybe_compact()
@@ -383,6 +445,14 @@ class ChatEngine:
         return self._active_model
 
     @property
+    def model_selector(self) -> ModelSelector | None:
+        return self._model_selector
+
+    @property
+    def contextual_index(self) -> ContextualIndex | None:
+        return self._contextual_index
+
+    @property
     def context_status(self) -> dict[str, Any]:
         if self._context:
             return self._context.status_dict()
@@ -395,6 +465,13 @@ class ChatEngine:
             f"Re-indexed: {self._project_map.total_files} files, "
             f"{self._project_map.total_symbols} symbols"
         )
+        # Also refresh contextual index
+        if self._contextual_index:
+            try:
+                chunk_count = await self._contextual_index.index_project()
+                msg += f", {chunk_count} chunks"
+            except Exception as exc:
+                logger.warning("Contextual re-index failed: %s", exc)
         logger.info(msg)
         return msg
 

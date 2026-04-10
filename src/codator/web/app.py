@@ -131,3 +131,96 @@ def _register_routes(app: FastAPI):
             return JSONResponse({"error": "model required"}, status_code=400)
         result = await _engine.switch_ollama_model(model)
         return {"status": result, "model": _engine.active_model}
+
+    @app.get("/api/gpu/status")
+    async def gpu_status():
+        """Live GPU + Ollama stats via ROCm monitoring."""
+        from codator.infrastructure.gpu_monitor import GPUMonitor
+        monitor = GPUMonitor()
+        return await monitor.get_full_status()
+
+    @app.get("/api/model-selector/info")
+    async def model_selector_info():
+        """Current model selector state."""
+        if _engine and _engine.model_selector:
+            return {
+                "available": True,
+                "tiers": {
+                    "fast": _engine.model_selector.FAST_MODELS,
+                    "medium": _engine.model_selector.MEDIUM_MODELS,
+                    "complex": _engine.model_selector.COMPLEX_MODELS,
+                },
+                "active_model": _engine.active_model,
+            }
+        return {"available": False}
+
+    @app.post("/api/agent/run")
+    async def agent_run(request: Request):
+        """Run Plan-Act-Verify agent cycle."""
+        from codator.core.agent_loop import PlanActVerifyAgent
+
+        data = await request.json()
+        task = data.get("task", "")
+        if not task:
+            return JSONResponse({"error": "task required"}, status_code=400)
+
+        ollama_cfg = _engine._settings.ollama
+        agent = PlanActVerifyAgent(
+            ollama_base_url=ollama_cfg.base_url,
+            model=_engine.active_model or ollama_cfg.model,
+            project_root=_engine._project_root,
+        )
+
+        result = await agent.run(task)
+        return {
+            "task": result.plan.task,
+            "reasoning": result.plan.reasoning,
+            "steps": [
+                {"action": s.step.action, "target": s.step.target,
+                 "success": s.success, "output": s.output[:500], "error": s.error}
+                for s in result.actions
+            ],
+            "verification": {
+                "success": result.verification.success,
+                "errors": result.verification.errors[:10],
+                "warnings": result.verification.warnings[:10],
+            },
+            "heal_iterations": result.heal_iterations,
+            "final_success": result.final_success,
+        }
+
+    @app.get("/api/context-index/stats")
+    async def context_index_stats():
+        """Contextual index statistics."""
+        if _engine and _engine.contextual_index:
+            idx = _engine.contextual_index
+            return {
+                "available": True,
+                "chunk_count": len(idx._chunks),
+            }
+        return {"available": False}
+
+    @app.post("/api/context-index/search")
+    async def context_index_search(request: Request):
+        """Search the contextual index."""
+        data = await request.json()
+        query = data.get("query", "")
+        top_k = data.get("top_k", 5)
+        if not query:
+            return JSONResponse({"error": "query required"}, status_code=400)
+        if _engine and _engine.contextual_index:
+            chunks = _engine.contextual_index.search(query, top_k=top_k)
+            return {
+                "results": [
+                    {
+                        "file_path": c.file_path,
+                        "start_line": c.start_line,
+                        "end_line": c.end_line,
+                        "parent_context": c.parent_context,
+                        "chunk_type": c.chunk_type,
+                        "content": c.content[:500],
+                    }
+                    for c in chunks
+                ],
+            }
+        return {"results": []}

@@ -94,6 +94,12 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
         case "/ollama":
             await _handle_ollama(arg, engine)
 
+        case "/agent":
+            await _handle_agent(arg, engine)
+
+        case "/gpu":
+            await _handle_gpu(engine)
+
         case _:
             print_error(f"Unknown command: {command}. Type /help for available commands.")
 
@@ -272,3 +278,99 @@ async def _handle_ollama(arg: str, engine: ChatEngine) -> None:
             # Treat as model name shortcut: /ollama qwen2.5-coder:14b
             result = await engine.switch_ollama_model(action)
             print_info(result)
+
+
+async def _handle_agent(arg: str, engine: ChatEngine) -> None:
+    """Handle /agent <task description> — run Plan-Act-Verify cycle."""
+    if not arg.strip():
+        print_info(
+            "Usage: /agent <task description>\n"
+            "  Runs a Plan-Act-Verify cycle to accomplish the task.\n"
+            "  Example: /agent Add docstrings to all functions in config.py"
+        )
+        return
+
+    from rich.live import Live
+    from rich.table import Table
+
+    from codator.core.agent_loop import PlanActVerifyAgent
+
+    ollama_cfg = engine._settings.ollama
+    agent = PlanActVerifyAgent(
+        ollama_base_url=ollama_cfg.base_url,
+        model=engine.active_model or ollama_cfg.model,
+        project_root=engine._project_root,
+    )
+
+    step_log: list[tuple[str, str]] = []
+
+    def on_step(description: str, status: str) -> None:
+        icon = {"started": "🔄", "running": "⏳", "done": "✅", "failed": "❌"}.get(
+            status, "•"
+        )
+        step_log.append((icon, description))
+        # Print inline
+        console.print(f"  {icon} {description}")
+
+    print_info(f"🤖 Agent starting: {arg}")
+    try:
+        result = await agent.run(arg, on_step=on_step)
+
+        # Summary
+        table = Table(title="Agent Result", border_style="cyan")
+        table.add_column("Metric", style="bold")
+        table.add_column("Value")
+        table.add_row("Task", result.plan.task)
+        table.add_row("Steps executed", str(len(result.actions)))
+        table.add_row("Heal iterations", str(result.heal_iterations))
+        table.add_row(
+            "Final status",
+            "[green]SUCCESS[/green]" if result.final_success else "[red]FAILED[/red]",
+        )
+        if result.verification.errors:
+            table.add_row("Errors", "\n".join(result.verification.errors[:5]))
+        if result.verification.warnings:
+            table.add_row("Warnings", "\n".join(result.verification.warnings[:5]))
+        console.print(table)
+    except Exception as exc:
+        print_error(f"Agent failed: {exc}")
+
+
+async def _handle_gpu(engine: ChatEngine) -> None:
+    """Handle /gpu — show real-time GPU and Ollama stats."""
+    from rich.table import Table
+
+    from codator.infrastructure.gpu_monitor import GPUMonitor
+
+    print_info("Fetching GPU stats...")
+    monitor = GPUMonitor()
+    status = await monitor.get_full_status()
+
+    gpu = status["gpu"]
+    ollama = status["ollama"]
+
+    table = Table(title="GPU Status (ROCm)", border_style="green")
+    table.add_column("Property", style="bold")
+    table.add_column("Value")
+    table.add_row("GPU", gpu["name"])
+    table.add_row(
+        "VRAM",
+        f"{gpu['vram_used_mb']:,} / {gpu['vram_total_mb']:,} MB "
+        f"({gpu['vram_free_mb']:,} MB free)",
+    )
+    table.add_row("Utilization", f"{gpu['utilization_pct']:.1f}%")
+    table.add_row("Temperature", f"{gpu['temperature_c']}°C")
+    console.print(table)
+
+    if ollama["running_models"]:
+        m_table = Table(title="Ollama Running Models", border_style="cyan")
+        m_table.add_column("Model", style="bold")
+        m_table.add_column("Size")
+        m_table.add_column("Processor")
+        m_table.add_column("Context")
+        for m in ollama["running_models"]:
+            size_gb = f"{m['size_bytes'] / 1_073_741_824:.1f} GB"
+            m_table.add_row(m["name"], size_gb, m["processor"], str(m["num_ctx"]))
+        console.print(m_table)
+    else:
+        print_info("No models currently loaded in Ollama.")
