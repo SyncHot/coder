@@ -21,8 +21,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from codator.domain.models import ToolCall, ToolResult
-
 
 # ===================================================================
 # 1. AGENT LOOP — PLAN PARSING
@@ -217,8 +215,6 @@ class TestToolLoopDetection:
 
     def test_normalize_params_paths(self):
         """Path normalization: ./ → ., .// → ., etc."""
-        import os
-
         # Simulate the normalization logic
         def _normalize(params):
             normalized = {}
@@ -237,7 +233,6 @@ class TestToolLoopDetection:
 
     def test_loop_key_deduplication(self):
         """Same tool + normalized params should produce same key."""
-        import os
 
         def _key(name, params):
             normalized = {}
@@ -458,7 +453,7 @@ class TestE2EScenario:
             Path(tmpdir, "frontend").mkdir()
             Path(tmpdir, "frontend/App.tsx").write_text("export default App;\n")
 
-            agent = AgentLoop(
+            AgentLoop(
                 model="test-model",
                 ollama_base_url="http://localhost:11434",
                 project_root=tmpdir,

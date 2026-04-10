@@ -9,7 +9,6 @@ Tests for:
 """
 
 from __future__ import annotations
-
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -87,7 +86,7 @@ class TestCompactionLoopPrevention:
 
         # First compaction
         await mgr.maybe_compact()
-        tokens_after_first = mgr.total_tokens()
+        mgr.total_tokens()  # capture state after first compaction
 
         # Force context above threshold again
         for i in range(15):

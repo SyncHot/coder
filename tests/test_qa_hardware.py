@@ -9,13 +9,11 @@ Tests for:
 """
 
 from __future__ import annotations
-
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from codator.domain.models import HardwareInfo, InferenceMode, ModelRecommendation
+from codator.domain.models import HardwareInfo, InferenceMode
 from codator.infrastructure.hardware import AMDHardwareProbe
 
 
@@ -143,9 +141,13 @@ class TestHardwareProbeFallback:
     def test_rocm_smi_json_parsing(self):
         """Simulate valid rocm-smi JSON output."""
         probe = AMDHardwareProbe()
-        mock_hw = _hw(vram_total=0)  # will be populated by parser
+        _hw(vram_total=0)  # will be populated by parser
 
-        rocm_smi_output = '{"card0": {"VRAM Total Memory (B)": "17179869184", "VRAM Total Used Memory (B)": "1073741824", "Card series": "AMD Radeon RX 9070 XT"}}'
+        rocm_smi_output = (
+            '{"card0": {"VRAM Total Memory (B)": "17179869184",'
+            ' "VRAM Total Used Memory (B)": "1073741824",'
+            ' "Card series": "AMD Radeon RX 9070 XT"}}'
+        )
 
         with patch("subprocess.run") as mock_run:
             mock_result = MagicMock()

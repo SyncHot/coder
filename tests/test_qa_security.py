@@ -13,11 +13,11 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from codator.domain.models import ToolCall, ToolResult
+from codator.domain.models import ToolCall
 
 
 # ===================================================================
@@ -262,7 +262,7 @@ class TestConfirmingToolGate:
 
             # Direct write (bypassing ConfirmingTool for unit testing)
             # The ConfirmingTool wraps this — we test the wrapper pattern
-            result = await write_tool.execute(
+            await write_tool.execute(
                 path="test.txt", content="hacked!"
             )
             # Direct call succeeds (no confirming wrapper)

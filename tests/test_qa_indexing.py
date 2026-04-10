@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -314,11 +312,9 @@ class TestMergeConflictHandling:
 
     def test_file_with_conflict_markers_indexed(self):
         """Files with conflict markers should still be indexable."""
-        from codator.core.project_indexer import TreeSitterProjectIndexer
-
         # tree-sitter will treat conflict markers as syntax errors
         # but should not crash
-        conflict_content = (
+        _ = (
             "def func():\n"
             "<<<<<<< HEAD\n"
             "    return 1\n"
