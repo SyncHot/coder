@@ -1315,54 +1315,86 @@ class PlanActVerifyAgent:
         """Ensure *new_text* has the same base indentation as *matched_text*.
 
         LLMs often produce replacement code with wrong base indentation.
-        Handles three cases:
+        Uses common-line matching: finds lines present in both old and new,
+        computes the indent delta from the first differing pair, then applies
+        that correction uniformly to all lines in new_text.
 
-        Case A — all lines under-indented:
-            First line has less indent than target → add delta to ALL lines.
-        Case B — first line correct, rest wrong:
-            First line matches target but subsequent lines have less →
-            add delta to subsequent lines only.
-        Case C — all lines over-indented:
-            First line has more indent than target → shift ALL lines left
-            by the excess, preserving relative structure.
+        Falls back to first-line comparison and per-line fixups when
+        common-line matching cannot determine a delta.
         """
 
         if "\n" not in new_text:
             return new_text
-
-        target_indent = re.match(r"(\s*)", matched_text).group(1)
-        if not target_indent:
-            return new_text  # matched text has no indentation
 
         lines = new_text.split("\n")
         non_empty = [(i, line) for i, line in enumerate(lines) if line.strip()]
         if len(non_empty) < 2:
             return new_text  # single meaningful line — nothing to align
 
-        first_i, first_line = non_empty[0]
-        first_indent = re.match(r"(\s*)", first_line).group(1)
+        # Build indent map for matched_text: stripped_content → indent_len
+        matched_indents: dict[str, int] = {}
+        for mline in matched_text.split("\n"):
+            s = mline.strip()
+            if s and s not in matched_indents:
+                matched_indents[s] = len(re.match(r"(\s*)", mline).group(1))
 
-        if len(first_indent) < len(target_indent):
-            # Case A: first line also under-indented — fix all lines
-            delta = target_indent[len(first_indent):]
-            return "\n".join(
-                delta + line if line.strip() else line for line in lines
-            )
+        # Strategy 1: common-line matching — find indent delta from a line
+        # that exists in both old and new but has different indentation.
+        delta: int | None = None
+        for _, nline in non_empty:
+            s = nline.strip()
+            if s in matched_indents:
+                actual = len(re.match(r"(\s*)", nline).group(1))
+                expected = matched_indents[s]
+                if actual != expected:
+                    delta = actual - expected
+                    break
 
-        if len(first_indent) > len(target_indent):
-            # Case C: first line over-indented — shift all lines left
-            excess = len(first_indent) - len(target_indent)
+        if delta is not None and delta != 0:
+            if delta > 0:
+                # Over-indented: shift all lines left
+                result = []
+                for line in lines:
+                    if not line.strip():
+                        result.append(line)
+                    else:
+                        cur = len(re.match(r"(\s*)", line).group(1))
+                        result.append(" " * max(0, cur - delta) + line.lstrip())
+                return "\n".join(result)
+            else:
+                # Under-indented: shift all lines right
+                pad = " " * (-delta)
+                return "\n".join(
+                    pad + line if line.strip() else line for line in lines
+                )
+
+        # Strategy 2: first-line comparison fallback
+        target_indent = re.match(r"(\s*)", matched_text).group(1)
+        first_indent = re.match(r"(\s*)", non_empty[0][1]).group(1)
+        fl_delta = len(first_indent) - len(target_indent)
+
+        if fl_delta > 0:
             result = []
             for line in lines:
                 if not line.strip():
                     result.append(line)
                 else:
                     cur = len(re.match(r"(\s*)", line).group(1))
-                    new_indent = max(0, cur - excess)
-                    result.append(" " * new_indent + line.lstrip())
+                    result.append(" " * max(0, cur - fl_delta) + line.lstrip())
             return "\n".join(result)
 
-        # First line has correct indent — check subsequent lines
+        if fl_delta < 0:
+            pad = " " * (-fl_delta)
+            return "\n".join(
+                pad + line if line.strip() else line for line in lines
+            )
+
+        # Strategy 3 (Case B): first line correct but subsequent lines
+        # under-indented (common when LLM drops indent on continuation lines)
+        first_i = non_empty[0][0]
+        if not target_indent:
+            return new_text
+
         subsequent = non_empty[1:]
         min_sub_indent = min(
             len(re.match(r"(\s*)", line).group(1)) for _, line in subsequent
@@ -1370,14 +1402,13 @@ class PlanActVerifyAgent:
         if min_sub_indent >= len(target_indent):
             return new_text  # all lines already have enough indentation
 
-        # Case B: add delta to subsequent lines only
-        delta = target_indent[:len(target_indent) - min_sub_indent]
+        sub_delta = target_indent[:len(target_indent) - min_sub_indent]
         result = []
         for i, line in enumerate(lines):
             if i == first_i or not line.strip():
                 result.append(line)
             else:
-                result.append(delta + line)
+                result.append(sub_delta + line)
         return "\n".join(result)
 
     async def _generate_edit(
