@@ -1837,16 +1837,35 @@ class PlanActVerifyAgent:
         return errors, warnings
 
     async def _verify_python_tests(self) -> tuple[list[str], list[str]]:
-        """Tier 3: Run pytest if tests/ directory exists."""
+        """Tier 3: Run pytest if tests/ directory exists.
+
+        Uses the project's own Python (venv or system) — NOT codator's
+        sys.executable, which would lack the project's dependencies and
+        produce false-positive import failures.
+        """
         errors: list[str] = []
         warnings: list[str] = []
 
         tests_dir = self._project_root / "tests"
-        if not tests_dir.is_dir():
+        backend_tests = self._project_root / "backend" / "tests"
+        if not tests_dir.is_dir() and not backend_tests.is_dir():
+            return errors, warnings
+
+        # Find the project's own Python (prefer venv, then system)
+        project_python: str | None = None
+        for venv_name in (".venv", "venv", "env"):
+            candidate = self._project_root / venv_name / "bin" / "python"
+            if candidate.exists():
+                project_python = str(candidate)
+                break
+        if not project_python:
+            # No project venv — skip tests rather than use codator's Python
+            # which would lack project dependencies
+            logger.info("No project venv found — skipping test verification")
             return errors, warnings
 
         pytest_result = await self._run_quiet(
-            f"{sys.executable} -m pytest --tb=short -q"
+            f"{project_python} -m pytest --tb=short -q"
         )
         if pytest_result is not None and "not found" not in pytest_result:
             for line in pytest_result.splitlines():
@@ -2227,6 +2246,10 @@ class PlanActVerifyAgent:
             all_actions: list[ActionResult] = []
             heal_iterations = 0
             prev_error_count: int | None = None  # no-progress detection
+            # Accumulate ALL modified files across iterations so that
+            # verify() always targets the right set (even if a heal
+            # iteration's edit fails, the file is still dirty from before).
+            all_changed_files: set[str] = set()
 
             for iteration in range(1 + self._max_heal):
                 changed_files: list[str] = []
@@ -2242,9 +2265,12 @@ class PlanActVerifyAgent:
                     await _notify(step.description, status)
                     if result.success and step.action in ("edit_file", "create_file"):
                         changed_files.append(step.target)
+                all_changed_files.update(changed_files)
 
+                # Use accumulated set so verify never falls back to "."
+                verify_targets = list(all_changed_files) if all_changed_files else changed_files
                 await _notify("Verifying…", "running")
-                verification = await self.verify(changed_files=changed_files)
+                verification = await self.verify(changed_files=verify_targets)
                 await _notify(
                     "Verification " + ("passed" if verification.success else "failed"),
                     "done" if verification.success else "failed",
