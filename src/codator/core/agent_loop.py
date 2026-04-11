@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import shutil
+import sys
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -1678,6 +1679,24 @@ class PlanActVerifyAgent:
         success = len(code_errors) == 0
         return VerifyResult(success=success, errors=code_errors, warnings=warnings)
 
+    @staticmethod
+    def _find_ruff() -> str | None:
+        """Locate ruff binary — checks codator's own venv first, then PATH.
+
+        When codator is invoked via its venv Python but the target project
+        doesn't have ruff installed, the plain 'ruff' command fails. This
+        resolves ruff from codator's own bin directory.
+        """
+        # 1. Same directory as the running Python interpreter
+        venv_bin = Path(sys.executable).parent / "ruff"
+        if venv_bin.exists():
+            return str(venv_bin)
+        # 2. System PATH
+        system_ruff = shutil.which("ruff")
+        if system_ruff:
+            return system_ruff
+        return None
+
     async def _capture_lint_baseline(self, files: list[str]) -> None:
         """Capture pre-existing lint errors for target files BEFORE editing.
 
@@ -1687,8 +1706,11 @@ class PlanActVerifyAgent:
         py_files = [f for f in files if f.endswith(".py")]
         if not py_files:
             return
+        ruff = self._find_ruff()
+        if not ruff:
+            return
         targets = " ".join(py_files)
-        result = await self._run_quiet(f"ruff check {targets}")
+        result = await self._run_quiet(f"{ruff} check {targets}")
         if result and "not found" not in result and "No such file" not in result:
             for line in result.splitlines():
                 stripped = line.strip()
@@ -1713,15 +1735,20 @@ class PlanActVerifyAgent:
         errors: list[str] = []
         warnings: list[str] = []
 
+        ruff = self._find_ruff()
+        if not ruff:
+            logger.info("ruff not available — skipping lint verification")
+            return errors, warnings
+
         # Build ruff command — target changed files if available
         if changed_files:
             py_files = [f for f in changed_files if f.endswith(".py")]
             if not py_files:
                 return errors, warnings
             targets = " ".join(py_files)
-            cmd = f"ruff check {targets}"
+            cmd = f"{ruff} check {targets}"
         else:
-            cmd = "ruff check ."
+            cmd = f"{ruff} check ."
 
         ruff_result = await self._run_quiet(cmd)
         if ruff_result is not None:
