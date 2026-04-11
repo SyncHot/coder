@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -1138,7 +1139,19 @@ class PlanActVerifyAgent:
         content = path.read_text(encoding="utf-8")
 
         def _write_and_cache(new_content: str, method: str) -> str:
-            """Write file and invalidate cache with fresh content."""
+            """Write file with pre-write syntax validation for Python files.
+
+            If the file is .py, ast.parse() must pass before write. On failure
+            the backup is restored and a structured error is raised so the agent
+            can self-correct instead of writing broken code.
+            """
+            if file_rel.endswith(".py"):
+                syntax_err = self._validate_python_syntax(new_content, file_rel)
+                if syntax_err:
+                    self._rollback_edit(file_rel, path, backup)
+                    raise ValueError(
+                        f"Pre-write validation failed — file NOT written.\n{syntax_err}"
+                    )
             path.write_text(new_content, encoding="utf-8")
             # Update cache so subsequent edits to same file see current state
             self._step_file_cache[file_rel] = new_content
@@ -1448,8 +1461,19 @@ class PlanActVerifyAgent:
 
     async def _act_create_file(self, step: AgentStep) -> str:
         path = self._safe_path(step.target)
+        file_rel = step.target
+
+        # Validate Python syntax before creating the file
+        if file_rel.endswith(".py"):
+            syntax_err = self._validate_python_syntax(step.description, file_rel)
+            if syntax_err:
+                raise ValueError(
+                    f"Refusing to create {file_rel} — syntax is invalid.\n{syntax_err}"
+                )
+
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(step.description, encoding="utf-8")
+        self._step_file_cache[file_rel] = step.description
         return f"Created {step.target}"
 
     async def _act_run_command(self, step: AgentStep) -> str:
@@ -1510,6 +1534,66 @@ class PlanActVerifyAgent:
         if not result.success:
             raise RuntimeError(result.error or "Glob failed")
         return result.output or "No files matched."
+
+    # -- pre-write validation ------------------------------------------------
+
+    @staticmethod
+    def _validate_python_syntax(content: str, file_path: str) -> str | None:
+        """Validate Python source before writing to disk.
+
+        Returns None if valid, or a structured error message aimed at an LLM
+        agent so it can self-correct without guessing.
+        """
+        try:
+            ast.parse(content, filename=file_path)
+            return None
+        except SyntaxError as exc:
+            return PlanActVerifyAgent._parse_error_for_agent(exc, file_path, content)
+
+    @staticmethod
+    def _parse_error_for_agent(
+        exc: SyntaxError, file_path: str, content: str,
+    ) -> str:
+        """Convert a SyntaxError into an actionable instruction for the LLM.
+
+        Instead of raw tracebacks the agent can't act on, this produces:
+        - Exact line number and column
+        - The offending line with a caret marker
+        - 3 lines of surrounding context so the agent can orient itself
+        """
+        lineno = exc.lineno or 0
+        col = exc.offset or 0
+        msg = exc.msg or "unknown syntax error"
+
+        lines = content.splitlines()
+        # Context window: 3 lines before, the error line, 3 lines after
+        start = max(0, lineno - 4)
+        end = min(len(lines), lineno + 3)
+        context_lines = []
+        for i in range(start, end):
+            prefix = ">>>" if i == lineno - 1 else "   "
+            context_lines.append(f"{prefix} {i + 1:4d} | {lines[i]}")
+            if i == lineno - 1 and col > 0:
+                context_lines.append(f"          {' ' * (col - 1)}^")
+
+        context_block = "\n".join(context_lines)
+        return (
+            f"SYNTAX ERROR in {file_path} at line {lineno}, col {col}: {msg}\n"
+            f"{context_block}\n"
+            f"FIX: Check indentation, brackets, and string delimiters near line {lineno}."
+        )
+
+    def _rollback_edit(self, file_rel: str, path: Path, backup: Path) -> None:
+        """Restore file from backup and invalidate cache.
+
+        Called when pre-write validation fails — guarantees the file on disk
+        stays in its last-known-good state.
+        """
+        if backup.exists():
+            shutil.copy2(backup, path)
+            logger.info("Rolled back %s from backup", file_rel)
+        # Invalidate cache so subsequent steps re-read from disk
+        self._step_file_cache.pop(file_rel, None)
 
     # -- verify --------------------------------------------------------------
 
