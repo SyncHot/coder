@@ -101,6 +101,9 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
             engine.set_mode("chat")
             print_info("💬 Switched to **chat mode**.")
 
+        case "/architect":
+            await _handle_architect(arg, engine)
+
         case "/gpu":
             await _handle_gpu(engine)
 
@@ -411,6 +414,78 @@ async def _handle_ollama(arg: str, engine: ChatEngine) -> None:
             print_info(result)
 
 
+async def _handle_architect(arg: str, engine: ChatEngine) -> None:
+    """Handle /architect command — set or show the architect (reasoning) model.
+
+    Usage:
+      /architect              — show current architect model
+      /architect <model>      — set architect model (e.g. deepseek-r1:32b)
+      /architect off          — disable architect mode (use single model)
+    """
+    arg = arg.strip()
+
+    if not arg:
+        current = engine.architect_model
+        if current:
+            print_info(
+                f"🏗️  Architect mode: **{current}** (plans/analyzes)\n"
+                f"   Editor model: **{engine.active_model}** (edits code)\n"
+                f"   Use `/architect off` to disable."
+            )
+        else:
+            print_info(
+                "🏗️  Architect mode is **off** (single model for everything).\n"
+                "   Use `/architect <model>` to enable, e.g.:\n"
+                "   `/architect deepseek-r1:32b-qwen-distill-q4_K_M`"
+            )
+        return
+
+    if arg.lower() in ("off", "none", "disable", "clear"):
+        engine.architect_model = None
+        print_info("🏗️  Architect mode **disabled**. Using single model for all tasks.")
+        return
+
+    # Set the architect model — verify it exists in Ollama
+    try:
+        import httpx
+        ollama_url = engine._settings.ollama.base_url
+        async with httpx.AsyncClient(base_url=ollama_url, timeout=10) as client:
+            resp = await client.get("/api/tags")
+            resp.raise_for_status()
+            models = [m["name"] for m in resp.json().get("models", [])]
+
+        # Allow partial matching
+        matched = None
+        for m in models:
+            if m == arg or m.startswith(arg):
+                matched = m
+                break
+
+        if not matched:
+            print_error(
+                f"Model '{arg}' not found in Ollama. Available models:\n"
+                + "\n".join(f"  • {m}" for m in models)
+            )
+            return
+
+        engine.architect_model = matched
+        engine.set_mode("agent")
+        print_info(
+            f"🏗️  Architect mode **enabled**:\n"
+            f"   Architect (reasoning): **{matched}**\n"
+            f"   Editor (code changes): **{engine.active_model}**\n"
+            f"   Auto-switched to agent mode."
+        )
+
+    except Exception as exc:
+        # Even if Ollama check fails, set the model anyway
+        engine.architect_model = arg
+        engine.set_mode("agent")
+        print_info(
+            f"🏗️  Architect model set to **{arg}** (could not verify: {exc})"
+        )
+
+
 async def run_agent_task(task: str, engine: ChatEngine) -> None:
     """Run the interactive agent cycle: Analyze → Propose → Pick → Implement."""
     import asyncio
@@ -433,6 +508,7 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
         project_root=engine._project_root,
         num_ctx=engine._settings.inference.context_size,
         confirm_callback=_confirm_command,
+        architect_model=engine.architect_model,
     )
 
     # --- Helpers ---

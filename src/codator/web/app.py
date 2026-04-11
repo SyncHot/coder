@@ -399,6 +399,7 @@ def _register_routes(app: FastAPI):
             ollama_base_url=ollama_cfg.base_url,
             model=_engine.active_model or ollama_cfg.model,
             project_root=_engine._project_root,
+            architect_model=_engine.architect_model,
         )
 
         result = await agent.run(task)
@@ -517,6 +518,7 @@ def _register_routes(app: FastAPI):
             model=_engine.active_model or ollama_cfg.model,
             project_root=_engine._project_root,
             num_ctx=_engine._settings.inference.context_size,
+            architect_model=_engine.architect_model,
         )
 
         async def event_generator():

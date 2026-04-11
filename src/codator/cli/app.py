@@ -36,7 +36,7 @@ COMMANDS = [
     "/help", "/quit", "/exit", "/model", "/api", "/context",
     "/clear", "/hardware", "/index", "/git", "/web", "/restart",
     "/ssh", "/browser", "/terminal", "/ollama",
-    "/agent", "/chat", "/gpu", "/memory", "/mcp",
+    "/agent", "/chat", "/architect", "/gpu", "/memory", "/mcp",
     "/save", "/load", "/history", "/undo",
     "/fetch", "/search",
 ]
@@ -53,11 +53,14 @@ def _load_session() -> dict:
     return {}
 
 
-def _save_session(mode: str, model: str) -> None:
+def _save_session(mode: str, model: str, architect_model: str | None = None) -> None:
     """Persist session state for next startup."""
     try:
         _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _SESSION_FILE.write_text(json.dumps({"mode": mode, "model": model}))
+        data = {"mode": mode, "model": model}
+        if architect_model:
+            data["architect_model"] = architect_model
+        _SESSION_FILE.write_text(json.dumps(data))
     except Exception:
         pass
 
@@ -175,6 +178,9 @@ async def async_main():
                 print_info(f"Restored model: {restored_model} (ctx: {num_ctx:,})")
             except Exception as exc:
                 logger.warning("Could not restore model %s: %s", restored_model, exc)
+    if saved.get("architect_model"):
+        engine.architect_model = saved["architect_model"]
+        print_info(f"🏗️  Restored architect: {saved['architect_model']}")
 
     print_welcome(engine.active_model, hw_summary)
 
@@ -190,6 +196,10 @@ async def async_main():
         if len(short) > 30:
             short = short[:27] + "…"
         mode_label = "agent" if engine.mode == "agent" else "chat"
+        arch = engine.architect_model
+        if arch:
+            arch_short = arch if len(arch) <= 20 else arch[:17] + "…"
+            return HTML(f'<style fg="#666666">🏗️ {arch_short}→{short} · {mode_label}</style>')
         return HTML(f'<style fg="#666666">{short} · {mode_label}</style>')
 
     # Dynamic bottom toolbar — context bar
@@ -274,7 +284,7 @@ async def async_main():
             # Slash commands
             if user_input.startswith("/"):
                 should_exit = await handle_command(user_input, engine)
-                _save_session(engine.mode, engine.active_model)
+                _save_session(engine.mode, engine.active_model, engine.architect_model)
                 if should_exit:
                     break
                 continue

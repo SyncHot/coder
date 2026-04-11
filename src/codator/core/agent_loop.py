@@ -624,7 +624,14 @@ Rules:
 
 
 class PlanActVerifyAgent:
-    """Structured Plan → Act → Verify agent backed by Ollama."""
+    """Structured Plan → Act → Verify agent backed by Ollama.
+
+    Supports optional **architect mode**: a reasoning model (e.g. deepseek-r1)
+    handles planning/analysis while an editor model (e.g. qwen2.5-coder)
+    handles code edits.  When ``architect_model`` is set, all LLM calls
+    for planning, healing, analysis, and proposals use it instead of the
+    default ``model``.
+    """
 
     def __init__(
         self,
@@ -634,9 +641,13 @@ class PlanActVerifyAgent:
         max_heal_iterations: int = 3,
         num_ctx: int = 32768,
         confirm_callback: Callable[[str, str], Any] | None = None,
+        architect_model: str | None = None,
+        architect_num_ctx: int | None = None,
     ) -> None:
         self._base_url = ollama_base_url.rstrip("/")
         self._model = model
+        self._architect_model = architect_model
+        self._architect_num_ctx = architect_num_ctx or num_ctx
         self._project_root = Path(project_root).resolve()
         self._max_heal = max_heal_iterations
         self._num_ctx = num_ctx
@@ -648,6 +659,15 @@ class PlanActVerifyAgent:
         )
         self._grep = GrepTool(project_root=str(self._project_root))
         self._glob = GlobTool(project_root=str(self._project_root))
+
+    @property
+    def architect_model(self) -> str | None:
+        """Return the current architect model (None if not set)."""
+        return self._architect_model
+
+    @architect_model.setter
+    def architect_model(self, value: str | None) -> None:
+        self._architect_model = value
 
     # -- helpers -------------------------------------------------------------
 
@@ -662,21 +682,32 @@ class PlanActVerifyAgent:
 
     async def _ollama_chat(self, system: str, user: str,
                           *, force_json: bool = True,
-                          on_token: Callable[[str], Any] | None = None) -> str:
+                          on_token: Callable[[str], Any] | None = None,
+                          use_architect: bool = False) -> str:
         """Call Ollama POST /api/chat and return content.
 
         When *on_token* is provided, streams the response and calls the
         callback for each token chunk (allows live "thinking" display).
         Uses a long read timeout (10 min) to support large quantised models.
+
+        When *use_architect* is True and an architect model is configured,
+        routes the request to the architect (reasoning) model instead.
         """
+        model = self._model
+        num_ctx = self._num_ctx
+        if use_architect and self._architect_model:
+            model = self._architect_model
+            num_ctx = self._architect_num_ctx
+            logger.debug("Using architect model: %s (ctx: %d)", model, num_ctx)
+
         payload: dict[str, Any] = {
-            "model": self._model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             "stream": on_token is not None,
-            "options": {"num_ctx": self._num_ctx},
+            "options": {"num_ctx": num_ctx},
         }
         if force_json:
             payload["format"] = "json"
@@ -911,7 +942,8 @@ class PlanActVerifyAgent:
             user_msg += f"\n\nProject context:\n{project_context}"
 
         logger.info("Planning for task: %s", task)
-        raw = await self._ollama_chat(_PLAN_SYSTEM, user_msg, on_token=on_token)
+        raw = await self._ollama_chat(_PLAN_SYSTEM, user_msg, on_token=on_token,
+                                     use_architect=True)
         logger.debug("Raw plan response: %s", raw)
         plan = self._parse_plan(raw, task)
         logger.info(
@@ -1227,7 +1259,8 @@ class PlanActVerifyAgent:
         )
 
         logger.info("Re-planning edit for %s via LLM", file_rel)
-        raw = await self._ollama_chat(_REPLAN_EDIT_SYSTEM, user_msg)
+        raw = await self._ollama_chat(_REPLAN_EDIT_SYSTEM, user_msg,
+                                     use_architect=True)
         corrected = safe_parse_json(raw)
 
         corrected_old = corrected.get("old", "")
@@ -1556,7 +1589,8 @@ class PlanActVerifyAgent:
 
         logger.info("Self-healing: %d errors to fix (prev attempts: %d)",
                     len(errors), len(previous_attempts or []))
-        raw = await self._ollama_chat(_HEAL_SYSTEM, user_msg, on_token=on_token)
+        raw = await self._ollama_chat(_HEAL_SYSTEM, user_msg, on_token=on_token,
+                                     use_architect=True)
         return self._parse_plan(raw, f"fix: {original_task}")
 
     # -- interactive flow (Claude-like) --------------------------------------
@@ -1625,6 +1659,7 @@ class PlanActVerifyAgent:
         )
         raw = await self._ollama_chat(
             _PROPOSE_SYSTEM, propose_prompt,
+            use_architect=True,
         )
         proposals = self._parse_proposals(raw)
         await _notify(f"{len(proposals)} proposals ready", "done")
@@ -1735,6 +1770,7 @@ class PlanActVerifyAgent:
         # Don't stream — this generates internal JSON, not user-facing text
         raw = await self._ollama_chat(
             _IMPLEMENT_SYSTEM, impl_prompt,
+            use_architect=True,
         )
         current_plan = self._parse_plan(raw, impl_task)
         await _notify(
@@ -1948,6 +1984,7 @@ class PlanActVerifyAgent:
                         summary_prompt,
                         force_json=False,
                         on_token=on_token,
+                        use_architect=True,
                     )
                     all_actions.append(ActionResult(
                         step=AgentStep(

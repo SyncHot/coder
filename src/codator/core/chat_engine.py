@@ -235,6 +235,7 @@ class ChatEngine:
         self._web_server: Any | None = None
         self._web_task: Any | None = None
         self._mode: str = "chat"  # "chat" or "agent"
+        self._architect_model: str | None = None  # optional reasoning model
 
     # ----- Lifecycle -----
 
@@ -1009,6 +1010,15 @@ class ChatEngine:
     @property
     def active_model(self) -> str:
         return self._active_model
+
+    @property
+    def architect_model(self) -> str | None:
+        """Return the architect (reasoning) model, or None if not set."""
+        return self._architect_model
+
+    @architect_model.setter
+    def architect_model(self, value: str | None) -> None:
+        self._architect_model = value
 
     @property
     def auto_select_enabled(self) -> bool:

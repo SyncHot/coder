@@ -243,6 +243,8 @@ def print_help():
 | `/ollama [list\\|use <model>]` | List/switch Ollama models |
 | `/agent <task>` | Run Plan-Act-Verify agent cycle |
 | `/agent` | Switch to persistent agent mode |
+| `/architect <model>` | Set reasoning model for planning (dual-model) |
+| `/architect off` | Disable architect mode |
 | `/chat` | Switch back to chat mode |
 | `/gpu` | Show GPU/VRAM & Ollama stats |
 | `/memory` | Show contextual index stats |
