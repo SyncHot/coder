@@ -2310,11 +2310,11 @@ class PlanActVerifyAgent:
                     )
                     status = "done" if result.success else "failed"
                     await _notify(step.description, status)
-                    if result.success and step.action in ("edit_file", "create_file"):
+                    if step.action in ("edit_file", "create_file") and step.target:
                         changed_files.append(step.target)
                 all_changed_files.update(changed_files)
 
-                # Use accumulated set so verify never falls back to "."
+                # Always scope verify to attempted targets (never full-project scan)
                 verify_targets = list(all_changed_files) if all_changed_files else changed_files
                 await _notify("Verifying…", "running")
                 verification = await self.verify(changed_files=verify_targets)
@@ -2567,8 +2567,9 @@ class PlanActVerifyAgent:
                     logger.warning(
                         "Step %d failed: %s", step.index, result.error
                     )
-                # Track files modified by mutating actions
-                if result.success and step.action in ("edit_file", "create_file"):
+                # Track files targeted by mutating actions (even failed ones,
+                # so verify is scoped to them, not the entire project)
+                if step.action in ("edit_file", "create_file") and step.target:
                     changed_files.append(step.target)
 
             # ---- Verify (skip for read-only analysis) ----------------------
