@@ -55,6 +55,22 @@ from codator.infrastructure.tools.notify_tool import NotifyTool
 from codator.infrastructure.tools.container_tool import ContainerTool
 from codator.infrastructure.tools.planner_tool import PlannerTool
 from codator.infrastructure.tools.lint_tool import LintTool
+from codator.infrastructure.tools.refactor_tool import RefactorTool
+from codator.infrastructure.tools.coverage_tool import CoverageTool
+from codator.infrastructure.tools.security_scan_tool import SecurityScanTool
+from codator.infrastructure.tools.embedding_search_tool import EmbeddingSearchTool
+from codator.infrastructure.tools.environment_tool import EnvironmentTool
+from codator.infrastructure.tools.profiler_tool import ProfilerTool
+from codator.infrastructure.tools.monitor_tool import MonitorTool
+from codator.infrastructure.tools.diagram_tool import DiagramTool
+from codator.infrastructure.tools.release_tool import ReleaseTool
+from codator.infrastructure.tools.benchmark_tool import BenchmarkTool
+from codator.infrastructure.tools.log_analyzer_tool import LogAnalyzerTool
+from codator.infrastructure.tools.scaffold_tool import ScaffoldTool
+from codator.infrastructure.tools.network_tool import NetworkTool
+from codator.infrastructure.tools.config_validator_tool import ConfigValidatorTool
+from codator.infrastructure.tools.archive_tool import ArchiveTool
+from codator.infrastructure.tools.hook_tool import HookTool
 
 logger = logging.getLogger(__name__)
 
@@ -403,6 +419,30 @@ class ChatEngine:
 
         # Lint — structured linter results
         self._tools.register(LintTool(cwd=self._project_root))
+
+        # --- Tier 1: highest-impact tools ---
+        self._tools.register(RefactorTool(cwd=self._project_root))
+        self._tools.register(CoverageTool(cwd=self._project_root))
+        self._tools.register(SecurityScanTool(cwd=self._project_root))
+        self._tools.register(EmbeddingSearchTool(cwd=self._project_root))
+        self._tools.register(EnvironmentTool(cwd=self._project_root))
+
+        # --- Tier 2: high-impact tools ---
+        self._tools.register(ProfilerTool(cwd=self._project_root))
+        self._tools.register(MonitorTool())
+        self._tools.register(DiagramTool(cwd=self._project_root))
+        self._tools.register(ReleaseTool(cwd=self._project_root))
+        self._tools.register(BenchmarkTool(cwd=self._project_root))
+
+        # --- Tier 3: completeness tools ---
+        self._tools.register(LogAnalyzerTool())
+        self._tools.register(ScaffoldTool())
+        self._tools.register(NetworkTool())
+        self._tools.register(ConfigValidatorTool(cwd=self._project_root))
+        self._tools.register(ArchiveTool())
+        self._tools.register(HookTool(
+            db_path=str(Path.home() / '.codator' / 'hooks.json'),
+        ))
 
     def _build_system_prompt(self) -> str:
         project_ctx = ""
