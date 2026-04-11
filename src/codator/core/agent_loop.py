@@ -2145,6 +2145,15 @@ class PlanActVerifyAgent:
         self._step_file_cache.clear()
         self._scratchpad.clear()
 
+        # ---- Lint baseline (capture pre-existing errors before edits) ----
+        edit_targets = list({
+            s.target for s in current_plan.steps
+            if s.action in ("edit_file", "create_file") and s.target
+        })
+        if edit_targets:
+            self._lint_baseline.clear()
+            await self._capture_lint_baseline(edit_targets)
+
         # Git transaction
         original_branch: str | None = None
         agent_branch: str | None = None
@@ -2190,15 +2199,25 @@ class PlanActVerifyAgent:
                     break
 
                 if iteration < self._max_heal:
-                    # No-progress detection
+                    # No-progress / explosion detection
                     current_error_count = len(verification.errors)
-                    if prev_error_count is not None and current_error_count >= prev_error_count:
+                    regression = (
+                        prev_error_count is not None
+                        and current_error_count >= prev_error_count
+                    )
+                    explosion = (
+                        prev_error_count is not None
+                        and prev_error_count > 0
+                        and current_error_count >= prev_error_count * 3
+                    )
+                    if regression or explosion:
+                        reason = "explosion" if explosion else "no progress"
                         logger.warning(
-                            "No progress in implement_proposals: errors %d → %d",
-                            prev_error_count, current_error_count,
+                            "No progress in implement_proposals: errors %d → %d (%s)",
+                            prev_error_count or 0, current_error_count, reason,
                         )
                         await _notify(
-                            f"No progress (errors: {current_error_count}). Stopping.",
+                            f"No progress ({reason}, errors: {current_error_count}). Stopping.",
                             "failed",
                         )
                         agent_result = AgentResult(
