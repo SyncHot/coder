@@ -184,8 +184,9 @@ class TestAgentActionSafety:
         from codator.core.agent_loop import AgentStep
         step = AgentStep(index=0, action="analyze", target="ghost.py",
                          description="Check", status="running")
-        with pytest.raises(FileNotFoundError):
-            await agent._act_analyze(step)
+        # Smart handling: returns FILE_NOT_FOUND hint instead of raising
+        result = await agent._act_analyze(step)
+        assert "FILE_NOT_FOUND" in result
 
     @pytest.mark.asyncio
     async def test_edit_file_creates_backup(self, agent):
@@ -240,8 +241,248 @@ class TestAgentActionSafety:
 
 
 # ===================================================================
-# 3. TOOL LOOP DETECTION IN CHAT ENGINE
+# 2b. SMART I/O — READ DIRS, MISSING FILES, PLAN VALIDATION
 # ===================================================================
+
+class TestSmartReadFile:
+    """Test that _act_read_file handles directories and missing files."""
+
+    @pytest.fixture
+    def agent(self, tmp_path):
+        from codator.core.agent_loop import PlanActVerifyAgent
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "src").mkdir()
+        (root / "src" / "main.py").write_text("print('hello')")
+        (root / "README.md").write_text("# Test")
+        return PlanActVerifyAgent(project_root=str(root))
+
+    @pytest.mark.asyncio
+    async def test_read_directory_returns_listing(self, agent):
+        from codator.core.agent_loop import AgentStep
+        step = AgentStep(index=0, action="read_file", target="src",
+                         description="Read src", status="running")
+        result = await agent._act_read_file(step)
+        assert "DIRECTORY_LISTING" in result
+        assert "main.py" in result
+
+    @pytest.mark.asyncio
+    async def test_read_nonexistent_returns_hint(self, agent):
+        from codator.core.agent_loop import AgentStep
+        step = AgentStep(index=0, action="read_file", target="ghost.py",
+                         description="Read ghost", status="running")
+        result = await agent._act_read_file(step)
+        assert "FILE_NOT_FOUND" in result
+        assert "create_file" in result
+
+    @pytest.mark.asyncio
+    async def test_analyze_directory_returns_listing(self, agent):
+        from codator.core.agent_loop import AgentStep
+        step = AgentStep(index=0, action="analyze", target="src",
+                         description="Analyze src", status="running")
+        result = await agent._act_analyze(step)
+        assert "DIRECTORY_LISTING" in result
+        assert "main.py" in result
+
+    @pytest.mark.asyncio
+    async def test_delete_nonexistent_returns_hint(self, agent):
+        from codator.core.agent_loop import AgentStep
+        step = AgentStep(index=0, action="delete_file", target="ghost.py",
+                         description="Delete ghost", status="running")
+        result = await agent._act_delete_file(step)
+        assert "FILE_NOT_FOUND" in result
+
+
+class TestPlanValidator:
+    """Test validate_plan detects READ-before-CREATE conflicts."""
+
+    def test_read_before_create_detected(self):
+        from codator.core.agent_loop import PlanActVerifyAgent, AgentPlan, AgentStep
+        plan = AgentPlan(
+            task="test",
+            steps=[
+                AgentStep(index=0, action="read_file", target="new_file.py",
+                          description="Read new_file"),
+                AgentStep(index=1, action="create_file", target="new_file.py",
+                          description="Create new_file"),
+            ],
+            reasoning="test",
+        )
+        warnings = PlanActVerifyAgent.validate_plan(plan)
+        assert len(warnings) == 1
+        assert "PLAN_CONFLICT" in warnings[0]
+        assert "new_file.py" in warnings[0]
+
+    def test_read_after_create_is_ok(self):
+        from codator.core.agent_loop import PlanActVerifyAgent, AgentPlan, AgentStep
+        plan = AgentPlan(
+            task="test",
+            steps=[
+                AgentStep(index=0, action="create_file", target="new_file.py",
+                          description="Create new_file"),
+                AgentStep(index=1, action="read_file", target="new_file.py",
+                          description="Read new_file"),
+            ],
+            reasoning="test",
+        )
+        warnings = PlanActVerifyAgent.validate_plan(plan)
+        assert len(warnings) == 0
+
+    def test_no_conflicts_in_normal_plan(self):
+        from codator.core.agent_loop import PlanActVerifyAgent, AgentPlan, AgentStep
+        plan = AgentPlan(
+            task="test",
+            steps=[
+                AgentStep(index=0, action="read_file", target="existing.py",
+                          description="Read existing"),
+                AgentStep(index=1, action="edit_file", target="existing.py",
+                          description="Edit existing"),
+            ],
+            reasoning="test",
+        )
+        warnings = PlanActVerifyAgent.validate_plan(plan)
+        assert len(warnings) == 0
+
+    def test_fix_read_before_create(self):
+        from codator.core.agent_loop import PlanActVerifyAgent, AgentPlan, AgentStep
+        plan = AgentPlan(
+            task="test",
+            steps=[
+                AgentStep(index=0, action="read_file", target="new.py",
+                          description="Read"),
+                AgentStep(index=1, action="create_file", target="new.py",
+                          description="Create"),
+                AgentStep(index=2, action="edit_file", target="existing.py",
+                          description="Edit"),
+            ],
+            reasoning="test",
+        )
+        fixed = PlanActVerifyAgent._fix_read_before_create(plan)
+        actions = [s.action for s in fixed.steps]
+        # The premature read_file should be removed
+        assert actions == ["create_file", "edit_file"]
+        # Indices should be renumbered
+        assert [s.index for s in fixed.steps] == [0, 1]
+
+
+class TestErrorToPromptTranslation:
+    """Test that I/O errors are translated to agent-friendly messages."""
+
+    @pytest.fixture
+    def agent(self, tmp_path):
+        from codator.core.agent_loop import PlanActVerifyAgent
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "src").mkdir()
+        return PlanActVerifyAgent(project_root=str(root))
+
+    @pytest.mark.asyncio
+    async def test_act_catches_file_not_found(self, agent):
+        from codator.core.agent_loop import AgentStep
+        step = AgentStep(index=0, action="read_file", target="ghost.py",
+                         description="Read ghost", status="running")
+        result = await agent.act(step)
+        # Should NOT crash — should return a failed ActionResult with hint
+        assert not result.success or "FILE_NOT_FOUND" in result.output
+
+    @pytest.mark.asyncio
+    async def test_act_catches_is_a_directory(self, agent):
+        from codator.core.agent_loop import AgentStep
+        step = AgentStep(index=0, action="read_file", target="src",
+                         description="Read src dir", status="running")
+        result = await agent.act(step)
+        # Should succeed with directory listing instead of crashing
+        assert result.success
+        assert "DIRECTORY_LISTING" in result.output
+
+
+class TestAtomicFileCreation:
+    """Test that create_file auto-creates missing parent directories."""
+
+    @pytest.fixture
+    def agent(self, tmp_path):
+        from codator.core.agent_loop import PlanActVerifyAgent
+        root = tmp_path / "project"
+        root.mkdir()
+        return PlanActVerifyAgent(project_root=str(root))
+
+    @pytest.mark.asyncio
+    async def test_create_file_deep_path(self, agent):
+        from codator.core.agent_loop import AgentStep
+        step = AgentStep(
+            index=0, action="create_file",
+            target="backend/new_folder/deep/file.txt",
+            description="hello world",
+            status="running",
+        )
+        result = await agent._act_create_file(step)
+        assert "Created" in result
+        created = agent._safe_path("backend/new_folder/deep/file.txt")
+        assert created.exists()
+        assert created.read_text() == "hello world"
+
+
+# ===================================================================
+# 2c. SMART FILE TOOL (ReadFileTool / WriteFileTool)
+# ===================================================================
+
+class TestSmartFileTool:
+    """Test the infrastructure-layer file tools with smart I/O handling."""
+
+    @pytest.fixture
+    def root(self, tmp_path):
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "src").mkdir()
+        (root / "src" / "app.py").write_text("print('app')")
+        return root
+
+    @pytest.mark.asyncio
+    async def test_read_file_tool_directory(self, root):
+        from codator.infrastructure.tools.file_tool import ReadFileTool
+        tool = ReadFileTool(project_root=str(root))
+        result = await tool.execute(path="src")
+        assert result.success
+        assert "DIRECTORY_LISTING" in result.output
+        assert "app.py" in result.output
+
+    @pytest.mark.asyncio
+    async def test_read_file_tool_missing(self, root):
+        from codator.infrastructure.tools.file_tool import ReadFileTool
+        tool = ReadFileTool(project_root=str(root))
+        result = await tool.execute(path="nonexistent.py")
+        assert not result.success
+        assert "FILE_NOT_FOUND" in result.error
+
+    @pytest.mark.asyncio
+    async def test_write_file_tool_deep_create(self, root):
+        from codator.infrastructure.tools.file_tool import WriteFileTool
+        tool = WriteFileTool(project_root=str(root))
+        result = await tool.execute(
+            path="a/b/c/deep.txt", content="deep content",
+        )
+        assert result.success
+        assert (root / "a" / "b" / "c" / "deep.txt").read_text() == "deep content"
+
+    @pytest.mark.asyncio
+    async def test_edit_file_tool_directory_error(self, root):
+        from codator.infrastructure.tools.file_tool import EditFileTool
+        tool = EditFileTool(project_root=str(root))
+        result = await tool.execute(
+            path="src", old_text="x", new_text="y",
+        )
+        assert not result.success
+        assert "IS_DIRECTORY" in result.error
+
+    @pytest.mark.asyncio
+    async def test_edit_file_tool_missing_error(self, root):
+        from codator.infrastructure.tools.file_tool import EditFileTool
+        tool = EditFileTool(project_root=str(root))
+        result = await tool.execute(
+            path="ghost.py", old_text="x", new_text="y",
+        )
+        assert not result.success
+        assert "FILE_NOT_FOUND" in result.error
 
 class TestToolLoopDetection:
     """Test the agentic loop's duplicate detection and path normalization."""

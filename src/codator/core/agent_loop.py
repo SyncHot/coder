@@ -784,6 +784,71 @@ class PlanActVerifyAgent:
             )
         return resolved
 
+    @staticmethod
+    def _translate_io_error(exc: OSError, path: str) -> str:
+        """Convert OS-level I/O errors into agent-friendly messages.
+
+        Instead of crashing the loop with a system traceback, return a
+        human-readable hint the LLM can act on.
+        """
+        import errno as _errno
+        if exc.errno == _errno.ENOENT:
+            return (
+                f"FILE_NOT_FOUND: Plik '{path}' jeszcze nie istnieje. "
+                "Jeśli chcesz go stworzyć, użyj akcji create_file."
+            )
+        if exc.errno == _errno.EISDIR:
+            return (
+                f"IS_DIRECTORY: Hej, próbujesz czytać folder '{path}' jako plik. "
+                "Użyj list_directory lub sprawdź ścieżkę."
+            )
+        if exc.errno == _errno.EACCES:
+            return (
+                f"PERMISSION_DENIED: Brak uprawnień do '{path}'. "
+                "Spróbuj: chmod u+rw {path}"
+            )
+        return f"I/O_ERROR: Błąd systemowy ({exc.errno}): {exc}"
+
+    @staticmethod
+    def validate_plan(plan: "AgentPlan") -> list[str]:
+        """Validate plan for logical inconsistencies.
+
+        Checks:
+        - READ before CREATE: if a plan reads a file that is scheduled
+          for creation later in the same plan, the read will fail.
+
+        Returns a list of warning messages (empty = plan is valid).
+        """
+        warnings: list[str] = []
+        create_targets: set[str] = set()
+
+        # Collect all files to be created
+        for step in plan.steps:
+            if step.action == "create_file" and step.target:
+                create_targets.add(step.target)
+
+        # Check for reads that happen before their create
+        created_so_far: set[str] = set()
+        for step in plan.steps:
+            if step.action == "create_file" and step.target:
+                created_so_far.add(step.target)
+            elif step.action in ("read_file", "analyze") and step.target:
+                if step.target in create_targets and step.target not in created_so_far:
+                    warnings.append(
+                        f"PLAN_CONFLICT: Krok {step.index} próbuje czytać "
+                        f"'{step.target}', ale plik ten jest dopiero tworzony "
+                        f"w późniejszym kroku. Pomiń odczyt lub zmień kolejność."
+                    )
+            elif step.action == "edit_file" and step.target:
+                if step.target in create_targets and step.target not in created_so_far:
+                    warnings.append(
+                        f"PLAN_CONFLICT: Krok {step.index} próbuje edytować "
+                        f"'{step.target}', ale plik ten jest dopiero tworzony "
+                        f"w późniejszym kroku. Zmień kolejność kroków."
+                    )
+
+        return warnings
+
     async def _ollama_chat(self, system: str, user: str,
                           *, force_json: bool = True,
                           on_token: Callable[[str], Any] | None = None,
@@ -1052,8 +1117,14 @@ class PlanActVerifyAgent:
     # -- act -----------------------------------------------------------------
 
     async def act(self, step: AgentStep) -> ActionResult:
-        """Execute a single plan step and return the outcome."""
+        """Execute a single plan step and return the outcome.
+
+        I/O errors (Errno 2 = ENOENT, Errno 21 = EISDIR) are caught and
+        translated into agent-friendly system messages instead of crashing
+        the loop.
+        """
         logger.info("Executing step %d: %s %s", step.index, step.action, step.target)
+        handler = None
         try:
             handler = {
                 "read_file": self._act_read_file,
@@ -1070,8 +1141,27 @@ class PlanActVerifyAgent:
             output = await handler(step)
             step.status = "done"
             return ActionResult(step=step, success=True, output=output, error="")
+        except FileNotFoundError as exc:
+            # Errno 2 — translate to agent-friendly message, don't crash
+            logger.warning(
+                "Step %d FileNotFoundError: %s", step.index, exc,
+            )
+            step.status = "failed"
+            hint = self._translate_io_error(exc, step.target)
+            return ActionResult(step=step, success=False, output="", error=hint)
+        except IsADirectoryError as exc:
+            # Errno 21 — translate to agent-friendly message, don't crash
+            logger.warning(
+                "Step %d IsADirectoryError: %s", step.index, exc,
+            )
+            step.status = "failed"
+            hint = (
+                f"IS_DIRECTORY: Hej, próbujesz czytać folder '{step.target}' "
+                "jako plik. Użyj list_directory lub sprawdź ścieżkę."
+            )
+            return ActionResult(step=step, success=False, output="", error=hint)
         except PermissionError as exc:
-            # Try to fix permissions automatically, then retry once
+            # PermissionError is a subclass of OSError — must be caught BEFORE it
             target_path = step.target
             logger.warning(
                 "PermissionError on step %d (%s) — attempting chmod fix",
@@ -1100,17 +1190,53 @@ class PlanActVerifyAgent:
                     f"Try running: chmod u+rw {target_path}"
                 ),
             )
+        except OSError as exc:
+            # Generic OS-level I/O error — translate, don't crash
+            logger.warning(
+                "Step %d OSError (errno=%s): %s", step.index, exc.errno, exc,
+            )
+            step.status = "failed"
+            hint = self._translate_io_error(exc, step.target)
+            return ActionResult(step=step, success=False, output="", error=hint)
         except Exception as exc:
             logger.error("Step %d failed: %s", step.index, exc)
             step.status = "failed"
             return ActionResult(step=step, success=False, output="", error=str(exc))
 
     async def _act_read_file(self, step: AgentStep) -> str:
+        """Smart read: handles dirs, missing files, and I/O errors gracefully."""
         path = self._safe_path(step.target)
-        content = path.read_text(encoding="utf-8")
-        # Cache for use by subsequent edit steps
-        self._step_file_cache[step.target] = content
-        return content
+
+        try:
+            # Smart: if path is a directory, return listing instead of crashing
+            if path.is_dir():
+                entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+                lines = []
+                for entry in entries:
+                    if entry.is_dir():
+                        lines.append(f"  📁 {entry.name}/")
+                    else:
+                        lines.append(f"  📄 {entry.name}  ({entry.stat().st_size:,} bytes)")
+                listing = "\n".join(lines) if lines else "  (pusty folder)"
+                return (
+                    f"DIRECTORY_LISTING: '{step.target}' jest folderem, nie plikiem. "
+                    f"Oto jego zawartość ({len(entries)} pozycji):\n{listing}"
+                )
+
+            # Smart: if file doesn't exist, return helpful hint
+            if not path.exists():
+                return (
+                    f"FILE_NOT_FOUND: Plik '{step.target}' jeszcze nie istnieje. "
+                    "Jeśli chcesz go stworzyć, użyj akcji create_file."
+                )
+
+            content = path.read_text(encoding="utf-8")
+            # Cache for use by subsequent edit steps
+            self._step_file_cache[step.target] = content
+            return content
+
+        except OSError as exc:
+            return self._translate_io_error(exc, step.target)
 
     async def _act_edit_file(self, step: AgentStep) -> str:
         # Handle both JSON string and dict descriptions
@@ -1560,6 +1686,7 @@ class PlanActVerifyAgent:
         return corrected_old, corrected_new
 
     async def _act_create_file(self, step: AgentStep) -> str:
+        """Atomic file creation — auto-creates missing parent directories."""
         path = self._safe_path(step.target)
         file_rel = step.target
 
@@ -1571,10 +1698,14 @@ class PlanActVerifyAgent:
                     f"Refusing to create {file_rel} — syntax is invalid.\n{syntax_err}"
                 )
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(step.description, encoding="utf-8")
-        self._step_file_cache[file_rel] = step.description
-        return f"Created {step.target}"
+        try:
+            # Atomic: auto-create all missing parent directories
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(step.description, encoding="utf-8")
+            self._step_file_cache[file_rel] = step.description
+            return f"Created {step.target}"
+        except OSError as exc:
+            return self._translate_io_error(exc, step.target)
 
     async def _act_run_command(self, step: AgentStep) -> str:
         result = await self._terminal.run_command(step.target, timeout=60)
@@ -1587,7 +1718,15 @@ class PlanActVerifyAgent:
     async def _act_delete_file(self, step: AgentStep) -> str:
         path = self._safe_path(step.target)
         if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
+            return (
+                f"FILE_NOT_FOUND: Plik '{step.target}' nie istnieje — "
+                "nie ma czego usuwać. Sprawdź ścieżkę."
+            )
+        if path.is_dir():
+            return (
+                f"IS_DIRECTORY: '{step.target}' jest folderem, nie plikiem. "
+                "Nie można usunąć folderu tą akcją."
+            )
         # backup before deleting
         backup = path.with_suffix(path.suffix + ".bak")
         shutil.copy2(path, backup)
@@ -1595,15 +1734,37 @@ class PlanActVerifyAgent:
         return f"Deleted {step.target} (backup at {backup.name})"
 
     async def _act_analyze(self, step: AgentStep) -> str:
-        """Read-only analysis: read the file and return its content for review."""
+        """Read-only analysis: handles dirs and missing files gracefully."""
         path = self._safe_path(step.target)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-        content = path.read_text(encoding="utf-8")
-        # Truncate very large files for analysis
-        if len(content) > 15000:
-            content = content[:15000] + f"\n... [truncated, total {len(content)} chars]"
-        return f"=== {step.target} ===\n{content}"
+
+        try:
+            if path.is_dir():
+                entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+                lines = []
+                for entry in entries:
+                    if entry.is_dir():
+                        lines.append(f"  📁 {entry.name}/")
+                    else:
+                        lines.append(f"  📄 {entry.name}  ({entry.stat().st_size:,} bytes)")
+                listing = "\n".join(lines) if lines else "  (pusty folder)"
+                return (
+                    f"DIRECTORY_LISTING: '{step.target}' jest folderem.\n"
+                    f"Zawartość ({len(entries)} pozycji):\n{listing}"
+                )
+
+            if not path.exists():
+                return (
+                    f"FILE_NOT_FOUND: Plik '{step.target}' jeszcze nie istnieje. "
+                    "Jeśli chcesz go stworzyć, użyj akcji create_file."
+                )
+
+            content = path.read_text(encoding="utf-8")
+            if len(content) > 15000:
+                content = content[:15000] + f"\n... [truncated, total {len(content)} chars]"
+            return f"=== {step.target} ===\n{content}"
+
+        except OSError as exc:
+            return self._translate_io_error(exc, step.target)
 
     async def _act_grep(self, step: AgentStep) -> str:
         """Search for a pattern in the codebase."""
@@ -2265,6 +2426,14 @@ class PlanActVerifyAgent:
         )
         current_plan = self._parse_plan(raw, impl_task)
         current_plan = self._ensure_reads_before_edits(current_plan)
+
+        # ---- Validate plan (detect READ-before-CREATE conflicts) -----------
+        plan_warnings = self.validate_plan(current_plan)
+        for warn in plan_warnings:
+            logger.warning("Plan validation (implement): %s", warn)
+        if plan_warnings:
+            current_plan = self._fix_read_before_create(current_plan)
+
         await _notify(
             f"Implementation plan — {len(current_plan.steps)} steps", "done"
         )
@@ -2510,6 +2679,49 @@ class PlanActVerifyAgent:
             reasoning=plan.reasoning,
         )
 
+    @staticmethod
+    def _fix_read_before_create(plan: AgentPlan) -> AgentPlan:
+        """Remove read_file steps for files that will be created later.
+
+        When validate_plan() detects a READ-before-CREATE conflict, this
+        method strips the premature read steps so the agent doesn't crash
+        trying to read a file that doesn't exist yet.
+        """
+        create_targets: set[str] = set()
+        for step in plan.steps:
+            if step.action == "create_file" and step.target:
+                create_targets.add(step.target)
+
+        created_so_far: set[str] = set()
+        fixed_steps: list[AgentStep] = []
+        next_index = 0
+
+        for step in plan.steps:
+            if step.action == "create_file" and step.target:
+                created_so_far.add(step.target)
+
+            # Skip reads for files not yet created
+            if (
+                step.action in ("read_file", "analyze")
+                and step.target in create_targets
+                and step.target not in created_so_far
+            ):
+                logger.info(
+                    "Removed premature %s for '%s' (file will be created later)",
+                    step.action, step.target,
+                )
+                continue
+
+            step.index = next_index
+            fixed_steps.append(step)
+            next_index += 1
+
+        return AgentPlan(
+            task=plan.task,
+            steps=fixed_steps,
+            reasoning=plan.reasoning,
+        )
+
     async def _run_inner(
         self,
         task: str,
@@ -2527,6 +2739,15 @@ class PlanActVerifyAgent:
         # Don't stream plan — internal JSON, not user-facing text
         current_plan = await self.plan(task, project_context)
         current_plan = self._ensure_reads_before_edits(current_plan)
+
+        # ---- Validate plan (detect READ-before-CREATE conflicts) -----------
+        plan_warnings = self.validate_plan(current_plan)
+        for warn in plan_warnings:
+            logger.warning("Plan validation: %s", warn)
+        if plan_warnings:
+            # Auto-fix: remove read_file steps for files that will be created
+            current_plan = self._fix_read_before_create(current_plan)
+
         await _notify(f"Plan ready — {len(current_plan.steps)} steps", "done")
 
         all_actions: list[ActionResult] = []

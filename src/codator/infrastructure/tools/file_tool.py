@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import pathlib
@@ -19,10 +20,10 @@ MAX_READ_SIZE = 256 * 1024
 
 
 class ReadFileTool(Tool):
-    """Read file contents from the project directory."""
+    """Smart file reader — handles directories and missing files gracefully."""
 
     def __init__(self, project_root: str = "."):
-        self._root = os.path.realpath(project_root)
+        self._root = pathlib.Path(project_root).resolve()
 
     @property
     def name(self) -> str:
@@ -32,7 +33,9 @@ class ReadFileTool(Tool):
     def description(self) -> str:
         return (
             "Read the contents of a text file in the project directory. "
-            "Max 256KB. Binary files are rejected. Use for source code, configs, docs."
+            "If the path is a directory, returns a listing of its contents. "
+            "If the file doesn't exist, returns a helpful hint. "
+            "Max 256KB. Binary files are rejected."
         )
 
     @property
@@ -53,38 +56,94 @@ class ReadFileTool(Tool):
         if not path:
             return ToolResult(success=False, error="No path provided.")
 
-        full = os.path.realpath(os.path.join(self._root, path))
-        if not full.startswith(self._root + os.sep) and full != self._root:
+        target = (self._root / path).resolve()
+        if not str(target).startswith(str(self._root)):
             return ToolResult(success=False, error="Access denied: path outside project.")
 
-        if not os.path.isfile(full):
-            return ToolResult(success=False, error=f"File not found: {path}")
-
-        size = os.path.getsize(full)
-        if size > MAX_READ_SIZE:
-            return ToolResult(
-                success=False,
-                error=f"File too large ({size:,} bytes, max {MAX_READ_SIZE:,}).",
-            )
-
         try:
+            # Smart handling: directory → list contents
+            if target.is_dir():
+                return self._list_directory(target, path)
+
+            # Smart handling: file doesn't exist → helpful hint
+            if not target.exists():
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"FILE_NOT_FOUND: Plik '{path}' jeszcze nie istnieje. "
+                        "Jeśli chcesz go stworzyć, użyj akcji zapisu (write_file / create_file)."
+                    ),
+                )
+
+            if not target.is_file():
+                return ToolResult(success=False, error=f"Not a regular file: {path}")
+
+            size = target.stat().st_size
+            if size > MAX_READ_SIZE:
+                return ToolResult(
+                    success=False,
+                    error=f"File too large ({size:,} bytes, max {MAX_READ_SIZE:,}).",
+                )
+
             # Check for binary content before reading as text
-            with open(full, "rb") as bf:
+            with target.open("rb") as bf:
                 chunk = bf.read(8192)
                 if b"\x00" in chunk:
                     return ToolResult(success=False, error=f"File appears to be binary: {path}")
-            with open(full, encoding="utf-8", errors="replace") as f:
-                content = f.read()
+            content = target.read_text(encoding="utf-8", errors="replace")
             return ToolResult(success=True, output=content)
+
+        except OSError as exc:
+            return self._translate_os_error(exc, path)
         except Exception as exc:
             return ToolResult(success=False, error=f"Read error: {exc}")
 
+    def _list_directory(self, target: pathlib.Path, rel_path: str) -> ToolResult:
+        """Return a directory listing when agent tries to read_file on a folder."""
+        try:
+            entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+            lines = []
+            for entry in entries:
+                if entry.is_dir():
+                    lines.append(f"  📁 {entry.name}/")
+                else:
+                    size = entry.stat().st_size
+                    lines.append(f"  📄 {entry.name}  ({size:,} bytes)")
+            header = (
+                f"DIRECTORY_LISTING: '{rel_path}' jest folderem, nie plikiem. "
+                f"Oto jego zawartość ({len(entries)} pozycji):"
+            )
+            return ToolResult(success=True, output=header + "\n" + "\n".join(lines))
+        except OSError as exc:
+            return self._translate_os_error(exc, rel_path)
+
+    @staticmethod
+    def _translate_os_error(exc: OSError, path: str) -> ToolResult:
+        """Translate OS-level I/O errors into agent-friendly messages."""
+        if exc.errno == errno.ENOENT:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"FILE_NOT_FOUND: Plik '{path}' jeszcze nie istnieje. "
+                    "Jeśli chcesz go stworzyć, użyj akcji zapisu (write_file / create_file)."
+                ),
+            )
+        if exc.errno == errno.EISDIR:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"IS_DIRECTORY: '{path}' jest folderem, nie plikiem. "
+                    "Użyj list_directory lub sprawdź ścieżkę."
+                ),
+            )
+        return ToolResult(success=False, error=f"I/O error: {exc}")
+
 
 class WriteFileTool(Tool):
-    """Write or update file contents in the project directory."""
+    """Atomic file writer — auto-creates missing parent directories."""
 
     def __init__(self, project_root: str = "."):
-        self._root = os.path.realpath(project_root)
+        self._root = pathlib.Path(project_root).resolve()
 
     @property
     def name(self) -> str:
@@ -94,7 +153,7 @@ class WriteFileTool(Tool):
     def description(self) -> str:
         return (
             "Write content to a file. Creates the file if it doesn't exist, "
-            "overwrites if it does. Creates parent directories as needed."
+            "overwrites if it does. Automatically creates parent directories as needed."
         )
 
     @property
@@ -120,25 +179,34 @@ class WriteFileTool(Tool):
         if not path:
             return ToolResult(success=False, error="No path provided.")
 
-        full = os.path.realpath(os.path.join(self._root, path))
-        if not full.startswith(self._root + os.sep) and full != self._root:
+        target = (self._root / path).resolve()
+        if not str(target).startswith(str(self._root)):
             return ToolResult(success=False, error="Access denied: path outside project.")
 
         try:
-            os.makedirs(os.path.dirname(full), exist_ok=True)
+            # Atomic: auto-create all missing parent directories
+            target.parent.mkdir(parents=True, exist_ok=True)
+
             # Backup existing file
-            if os.path.isfile(full):
-                backup = full + ".bak"
-                with open(full, encoding="utf-8", errors="replace") as f:
-                    old_content = f.read()
-                with open(backup, "w", encoding="utf-8") as f:
-                    f.write(old_content)
-            with open(full, "w", encoding="utf-8") as f:
-                f.write(content)
+            if target.is_file():
+                backup = target.with_suffix(target.suffix + ".bak")
+                backup.write_text(
+                    target.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+
+            target.write_text(content, encoding="utf-8")
             return ToolResult(
                 success=True,
                 output=f"Written {len(content)} bytes to {path}",
             )
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return ToolResult(
+                    success=False,
+                    error=f"Cannot create file '{path}': parent path issue — {exc}",
+                )
+            return ToolResult(success=False, error=f"Write I/O error: {exc}")
         except Exception as exc:
             return ToolResult(success=False, error=f"Write error: {exc}")
 
@@ -147,7 +215,7 @@ class EditFileTool(Tool):
     """Apply a search-and-replace edit to a file in the project."""
 
     def __init__(self, project_root: str = "."):
-        self._root = os.path.realpath(project_root)
+        self._root = pathlib.Path(project_root).resolve()
 
     @property
     def name(self) -> str:
@@ -192,16 +260,29 @@ class EditFileTool(Tool):
         if not old_text:
             return ToolResult(success=False, error="No old_text provided.")
 
-        full = os.path.realpath(os.path.join(self._root, path))
-        if not full.startswith(self._root + os.sep) and full != self._root:
+        target = (self._root / path).resolve()
+        if not str(target).startswith(str(self._root)):
             return ToolResult(success=False, error="Access denied: path outside project.")
 
-        if not os.path.isfile(full):
-            return ToolResult(success=False, error=f"File not found: {path}")
+        if target.is_dir():
+            return ToolResult(
+                success=False,
+                error=(
+                    f"IS_DIRECTORY: '{path}' jest folderem, nie plikiem. "
+                    "Sprawdź ścieżkę — nie można edytować folderu."
+                ),
+            )
+        if not target.exists():
+            return ToolResult(
+                success=False,
+                error=(
+                    f"FILE_NOT_FOUND: Plik '{path}' nie istnieje. "
+                    "Użyj read_file, aby sprawdzić ścieżkę, lub create_file, aby go stworzyć."
+                ),
+            )
 
         try:
-            with open(full, encoding="utf-8", errors="replace") as f:
-                content = f.read()
+            content = target.read_text(encoding="utf-8", errors="replace")
 
             if old_text not in content:
                 return ToolResult(
@@ -217,17 +298,23 @@ class EditFileTool(Tool):
                 )
 
             # Backup
-            with open(full + ".bak", "w", encoding="utf-8") as f:
-                f.write(content)
+            backup = target.with_suffix(target.suffix + ".bak")
+            backup.write_text(content, encoding="utf-8")
 
             new_content = content.replace(old_text, new_text, 1)
-            with open(full, "w", encoding="utf-8") as f:
-                f.write(new_content)
+            target.write_text(new_content, encoding="utf-8")
 
             return ToolResult(
                 success=True,
                 output=f"Edited {path}: replaced {len(old_text)} chars with {len(new_text)} chars",
             )
+        except OSError as exc:
+            if exc.errno == errno.EISDIR:
+                return ToolResult(
+                    success=False,
+                    error=f"IS_DIRECTORY: '{path}' jest folderem. Sprawdź ścieżkę.",
+                )
+            return ToolResult(success=False, error=f"Edit I/O error: {exc}")
         except Exception as exc:
             return ToolResult(success=False, error=f"Edit error: {exc}")
 
@@ -236,7 +323,7 @@ class ListDirectoryTool(Tool):
     """List files and directories in the project."""
 
     def __init__(self, project_root: str = "."):
-        self._root = os.path.realpath(project_root)
+        self._root = pathlib.Path(project_root).resolve()
 
     @property
     def name(self) -> str:
@@ -266,25 +353,31 @@ class ListDirectoryTool(Tool):
 
     async def execute(self, **kwargs) -> ToolResult:
         path = kwargs.get("path", ".")
-        full = os.path.realpath(os.path.join(self._root, path))
-        if not full.startswith(self._root + os.sep) and full != self._root:
+        target = (self._root / path).resolve()
+        if not str(target).startswith(str(self._root)):
             return ToolResult(success=False, error="Access denied: path outside project.")
 
-        if not os.path.isdir(full):
+        if not target.is_dir():
             return ToolResult(success=False, error=f"Directory not found: {path}")
 
         try:
-            entries = sorted(os.listdir(full))
+            entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name))
             lines = []
             for entry in entries:
-                fp = os.path.join(full, entry)
-                if os.path.isdir(fp):
-                    lines.append(f"  {entry}/")
+                if entry.is_dir():
+                    lines.append(f"  {entry.name}/")
                 else:
-                    size = os.path.getsize(fp)
-                    lines.append(f"  {entry}  ({size:,} bytes)")
-            header = f"Directory: {path}/ ({len(entries)} entries)"
+                    size = entry.stat().st_size
+                    lines.append(f"  {entry.name}  ({size:,} bytes)")
+            header = f"Directory: {path}/ ({len(list(target.iterdir()))} entries)"
             return ToolResult(success=True, output=header + "\n" + "\n".join(lines))
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return ToolResult(
+                    success=False,
+                    error=f"Directory '{path}' does not exist.",
+                )
+            return ToolResult(success=False, error=f"List I/O error: {exc}")
         except Exception as exc:
             return ToolResult(success=False, error=f"List error: {exc}")
 
