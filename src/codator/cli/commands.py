@@ -1230,10 +1230,16 @@ async def _handle_qa(arg: str, engine: ChatEngine) -> None:
             f"{finding.app}: {finding.title}"
         )
 
+    # Get browser & vision tools from engine for UI/workflow testing
+    browser_tool = engine._tools.get("browser")
+    vision_tool = engine._tools.get("vision")
+
     runner = QARunner(
         client=client,
         project_name=cfg.qa.project_name,
         on_finding=on_finding,
+        browser_tool=browser_tool,
+        vision_tool=vision_tool,
     )
 
     skip = set(cfg.qa.skip_suites)
