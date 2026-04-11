@@ -104,6 +104,20 @@ class OllamaConfig(BaseModel):
     model: str = "qwen2.5-coder:14b-instruct-q6_K"
 
 
+class VisionConfig(BaseModel):
+    model: str = ""  # e.g. "minicpm-v", empty = auto-detect
+    enabled: bool = True
+
+
+class IssueConfig(BaseModel):
+    backend: str = "auto"  # "auto", "gh", "gitea", "github"
+    gitea_url: str = ""
+    gitea_token: str = ""
+    github_token: str = ""
+    default_repo: str = ""  # "owner/repo"
+    default_labels: list[str] = []
+
+
 class AppSettings(BaseSettings):
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
@@ -114,6 +128,8 @@ class AppSettings(BaseSettings):
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     terminal: TerminalConfig = Field(default_factory=TerminalConfig)
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
+    issue: IssueConfig = Field(default_factory=IssueConfig)
 
 
 # ---------------------------------------------------------------------------

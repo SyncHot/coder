@@ -31,8 +31,9 @@ class BrowserTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Control a headless browser. "
-            "Supports: launch, navigate, click, fill, screenshot, get_text, close."
+            "Control a headless browser for web testing and QA. "
+            "Supports: launch, navigate, click, fill, screenshot, get_text, "
+            "wait_for, evaluate, get_elements, get_console_errors, get_network_errors, close."
         )
 
     def _ensure_playwright(self):
@@ -63,6 +64,17 @@ class BrowserTool(Tool):
             )
             self._page = await self._browser.new_page(viewport=self._viewport)
             self._page.set_default_timeout(self._timeout)
+            # Set up event listeners for QA
+            self._console_errors = []
+            self._network_errors = []
+            self._page.on("console", lambda msg: (
+                self._console_errors.append(f"[{msg.type}] {msg.text}")
+                if msg.type in ("error", "warning") else None
+            ))
+            self._page.on("response", lambda resp: (
+                self._network_errors.append(f"{resp.status} {resp.url[:200]}")
+                if resp.status >= 400 else None
+            ))
             return ToolResult(success=True, output="Browser launched (Chromium, headless).")
         except Exception as exc:
             return ToolResult(success=False, error=f"Browser launch failed: {exc}")
@@ -141,6 +153,79 @@ class BrowserTool(Tool):
         except Exception as exc:
             return ToolResult(success=False, error=f"get_text failed: {exc}")
 
+
+    async def wait_for(self, selector: str, timeout: int = 0) -> ToolResult:
+        """Wait for an element to appear."""
+        if self._page is None:
+            return ToolResult(success=False, error="Browser not launched.")
+
+        try:
+            t = timeout or self._timeout
+            await self._page.wait_for_selector(selector, timeout=t)
+            return ToolResult(success=True, output=f"Element found: {selector}")
+        except Exception as exc:
+            return ToolResult(success=False, error=f"Timeout waiting for {selector}: {exc}")
+
+    async def get_console_errors(self) -> ToolResult:
+        """Return any JavaScript console errors captured since navigation."""
+        if self._page is None:
+            return ToolResult(success=False, error="Browser not launched.")
+
+        # Console messages are collected via event listener (set on launch)
+        errors = getattr(self, "_console_errors", [])
+        if not errors:
+            return ToolResult(success=True, output="No console errors detected.")
+        output = f"{len(errors)} console error(s):\n" + "\n".join(errors[-50:])
+        return ToolResult(success=True, output=output)
+
+    async def evaluate(self, expression: str) -> ToolResult:
+        """Execute JavaScript in the page and return result."""
+        if self._page is None:
+            return ToolResult(success=False, error="Browser not launched.")
+
+        try:
+            result = await self._page.evaluate(expression)
+            output = str(result) if result is not None else "undefined"
+            if len(output) > 10_000:
+                output = output[:10_000] + "\n... [truncated]"
+            return ToolResult(success=True, output=output)
+        except Exception as exc:
+            return ToolResult(success=False, error=f"JS evaluation failed: {exc}")
+
+    async def get_elements(self, selector: str) -> ToolResult:
+        """Count elements matching a selector and return basic info."""
+        if self._page is None:
+            return ToolResult(success=False, error="Browser not launched.")
+
+        try:
+            elements = await self._page.query_selector_all(selector)
+            count = len(elements)
+            # Get text of first few elements
+            infos = []
+            for el in elements[:10]:
+                text = (await el.inner_text() or "").strip()[:100]
+                tag = await el.evaluate("el => el.tagName.toLowerCase()")
+                infos.append(f"<{tag}> {text}")
+            output = f"{count} element(s) matching '{selector}'"
+            if infos:
+                output += ":\n" + "\n".join(infos)
+                if count > 10:
+                    output += f"\n... and {count - 10} more"
+            return ToolResult(success=True, output=output, artifacts={"count": count})
+        except Exception as exc:
+            return ToolResult(success=False, error=f"get_elements failed: {exc}")
+
+    async def get_network_errors(self) -> ToolResult:
+        """Return failed network requests (4xx/5xx) captured during browsing."""
+        if self._page is None:
+            return ToolResult(success=False, error="Browser not launched.")
+
+        errors = getattr(self, "_network_errors", [])
+        if not errors:
+            return ToolResult(success=True, output="No network errors detected.")
+        output = f"{len(errors)} failed request(s):\n" + "\n".join(errors[-50:])
+        return ToolResult(success=True, output=output)
+
     # ------------------------------------------------------------------
     # Tool interface
     # ------------------------------------------------------------------
@@ -176,6 +261,19 @@ class BrowserTool(Tool):
             case "close":
                 await self.close()
                 return ToolResult(success=True, output="Browser closed.")
+            case "wait_for":
+                return await self.wait_for(
+                    selector=kwargs.get("selector", ""),
+                    timeout=kwargs.get("timeout", 0),
+                )
+            case "evaluate":
+                return await self.evaluate(expression=kwargs.get("expression", ""))
+            case "get_elements":
+                return await self.get_elements(selector=kwargs.get("selector", ""))
+            case "get_console_errors":
+                return await self.get_console_errors()
+            case "get_network_errors":
+                return await self.get_network_errors()
             case _:
                 return ToolResult(
                     success=False,

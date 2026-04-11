@@ -40,6 +40,8 @@ from codator.infrastructure.tools.file_tool import (
 from codator.infrastructure.tools.ssh_tool import SSHTool
 from codator.infrastructure.tools.terminal_tool import TerminalTool
 from codator.infrastructure.tools.web_tools import WebFetchTool, WebSearchTool
+from codator.infrastructure.tools.vision_tool import VisionTool
+from codator.infrastructure.tools.issue_tool import IssueTool
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +325,26 @@ class ChatEngine:
         # Web tools — lightweight fetch & search (no API key needed)
         self._tools.register(WebFetchTool())
         self._tools.register(WebSearchTool())
+
+        # Vision tool — screenshot analysis via multimodal LLM
+        if cfg.vision.enabled:
+            vision = VisionTool(
+                ollama_url=cfg.ollama.base_url,
+                vision_model=cfg.vision.model,
+                claude_api_key=getattr(cfg.api, 'claude_api_key', ''),
+            )
+            self._tools.register(vision)
+
+        # Issue tool — create/manage tickets
+        issue = IssueTool(
+            backend=cfg.issue.backend,
+            gitea_url=cfg.issue.gitea_url,
+            gitea_token=cfg.issue.gitea_token,
+            github_token=cfg.issue.github_token,
+            default_repo=cfg.issue.default_repo,
+            default_labels=cfg.issue.default_labels,
+        )
+        self._tools.register(issue)
 
     def _build_system_prompt(self) -> str:
         project_ctx = ""

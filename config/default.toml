@@ -114,3 +114,17 @@ dangerous_patterns = [
 # Ollama local inference
 base_url = "http://localhost:11434"
 model = "qwen2.5-coder:32b"
+
+[vision]
+# Vision model for screenshot analysis (empty = auto-detect minicpm-v/llava)
+model = ""
+enabled = true
+
+[issue]
+# Issue tracking backend: "auto", "gh", "gitea", "github"
+backend = "auto"
+gitea_url = ""
+gitea_token = ""
+github_token = ""
+default_repo = ""
+default_labels = ["bug", "qa-automated"]
