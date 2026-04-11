@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -42,6 +43,10 @@ from codator.infrastructure.tools.terminal_tool import TerminalTool
 from codator.infrastructure.tools.web_tools import WebFetchTool, WebSearchTool
 from codator.infrastructure.tools.vision_tool import VisionTool
 from codator.infrastructure.tools.issue_tool import IssueTool
+from codator.infrastructure.tools.memory_tool import MemoryTool
+from codator.infrastructure.tools.git_tool import GitTool
+from codator.infrastructure.tools.api_test_tool import APITestTool
+from codator.infrastructure.tools.code_intel_tool import CodeIntelTool
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +350,24 @@ class ChatEngine:
             default_labels=cfg.issue.default_labels,
         )
         self._tools.register(issue)
+
+        # Memory tool — persistent knowledge store
+        memory = MemoryTool(
+            db_path=str(Path.home() / ".codator" / "memory.db"),
+        )
+        self._tools.register(memory)
+
+        # Git tool — structured git operations
+        git_tool = GitTool(cwd=self._project_root)
+        self._tools.register(git_tool)
+
+        # API test tool — HTTP client with assertions
+        api_test = APITestTool()
+        self._tools.register(api_test)
+
+        # Code intelligence — semantic symbol search
+        code_intel = CodeIntelTool(cwd=self._project_root)
+        self._tools.register(code_intel)
 
     def _build_system_prompt(self) -> str:
         project_ctx = ""
