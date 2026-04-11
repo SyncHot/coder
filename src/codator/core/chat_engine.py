@@ -47,6 +47,14 @@ from codator.infrastructure.tools.memory_tool import MemoryTool
 from codator.infrastructure.tools.git_tool import GitTool
 from codator.infrastructure.tools.api_test_tool import APITestTool
 from codator.infrastructure.tools.code_intel_tool import CodeIntelTool
+from codator.infrastructure.tools.test_runner_tool import TestRunnerTool
+from codator.infrastructure.tools.diff_preview_tool import DiffPreviewTool
+from codator.infrastructure.tools.database_tool import DatabaseTool
+from codator.infrastructure.tools.doc_reader_tool import DocReaderTool
+from codator.infrastructure.tools.notify_tool import NotifyTool
+from codator.infrastructure.tools.container_tool import ContainerTool
+from codator.infrastructure.tools.planner_tool import PlannerTool
+from codator.infrastructure.tools.lint_tool import LintTool
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +376,33 @@ class ChatEngine:
         # Code intelligence — semantic symbol search
         code_intel = CodeIntelTool(cwd=self._project_root)
         self._tools.register(code_intel)
+
+        # Test runner — structured test results
+        self._tools.register(TestRunnerTool(cwd=self._project_root))
+
+        # Diff preview — see changes before applying
+        self._tools.register(DiffPreviewTool(cwd=self._project_root))
+
+        # Database — SQL queries against databases
+        self._tools.register(DatabaseTool())
+
+        # Document reader — PDF, XLSX, CSV, Markdown
+        self._tools.register(DocReaderTool(cwd=self._project_root))
+
+        # Notifications — Slack, Discord, email, webhooks
+        self._tools.register(NotifyTool(
+            slack_webhook=getattr(cfg, "slack_webhook", ""),
+            discord_webhook=getattr(cfg, "discord_webhook", ""),
+        ))
+
+        # Container — Docker management
+        self._tools.register(ContainerTool())
+
+        # Planner — task decomposition and tracking
+        self._tools.register(PlannerTool())
+
+        # Lint — structured linter results
+        self._tools.register(LintTool(cwd=self._project_root))
 
     def _build_system_prompt(self) -> str:
         project_ctx = ""
