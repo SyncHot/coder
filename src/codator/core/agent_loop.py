@@ -470,6 +470,47 @@ class Proposal:
     priority: str = "medium"  # low / medium / high
 
 
+class StepScratchpad:
+    """Rolling context accumulator — tracks what the agent has done.
+
+    Provides compact summaries of step results so the LLM can reason
+    about prior actions in heal and edit-generation calls without
+    needing full conversation history.
+    """
+
+    def __init__(self, max_entries: int = 20) -> None:
+        self._entries: list[str] = []
+        self._max = max_entries
+
+    def record(self, step: AgentStep, success: bool,
+               output: str = "", error: str = "") -> None:
+        """Record a step result as a compact one-liner."""
+        icon = "✓" if success else "✗"
+        detail = output[:120] if success else error[:120]
+        # Strip newlines for compact display
+        detail = detail.replace("\n", " ").strip()
+        entry = f"{icon} {step.action}({step.target}): {detail}"
+        self._entries.append(entry)
+        # FIFO — drop oldest when over budget
+        if len(self._entries) > self._max:
+            self._entries = self._entries[-self._max:]
+
+    def to_context(self, last_n: int = 10) -> str:
+        """Return last N entries as context string for LLM prompts."""
+        if not self._entries:
+            return ""
+        entries = self._entries[-last_n:]
+        return "AGENT PROGRESS SO FAR:\n" + "\n".join(entries)
+
+    def clear(self) -> None:
+        """Reset the scratchpad for a new plan execution."""
+        self._entries.clear()
+
+    @property
+    def entries(self) -> list[str]:
+        return list(self._entries)
+
+
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
@@ -537,6 +578,11 @@ CRITICAL RULES:
 - Valid actions: read_file, edit_file, create_file, run_command, delete_file, analyze, grep, glob.
 - ALWAYS read_file before edit_file.
 - For edit_file: describe WHAT to change in plain text. The system will generate precise edits.
+- If a file was already modified (listed in "FILES ALREADY MODIFIED"), its content
+  has CHANGED. You MUST re-read it before editing — do NOT assume old content.
+- NEVER repeat an edit that already failed with "text not found" — try a different approach.
+- If the same error persists after 2 attempts, try a COMPLETELY different strategy
+  (different file, different function, or alternative implementation).
 - Return ONLY valid JSON, no markdown fences.
 """
 
@@ -688,6 +734,9 @@ class PlanActVerifyAgent:
         # execution so that subsequent edit steps can access them without
         # re-reading and can include them in LLM prompts for better edits.
         self._step_file_cache: dict[str, str] = {}
+
+        # Rolling scratchpad — compact log of what agent did for LLM context
+        self._scratchpad = StepScratchpad(max_entries=20)
 
     @property
     def architect_model(self) -> str | None:
@@ -1101,12 +1150,18 @@ class PlanActVerifyAgent:
 
         content = path.read_text(encoding="utf-8")
 
+        def _write_and_cache(new_content: str, method: str) -> str:
+            """Write file and invalidate cache with fresh content."""
+            path.write_text(new_content, encoding="utf-8")
+            # Update cache so subsequent edits to same file see current state
+            self._step_file_cache[file_rel] = new_content
+            return f"Edited {file_rel} ({method}, backup at {backup.name})"
+
         # 1. Try exact match
         if old_text in content:
             new_text = self._align_indentation(old_text, new_text)
             content = content.replace(old_text, new_text, 1)
-            path.write_text(content, encoding="utf-8")
-            return f"Edited {file_rel} (exact match, backup at {backup.name})"
+            return _write_and_cache(content, "exact match")
 
         # 2. Try whitespace-normalised match
         match_pos = self._fuzzy_find(content, old_text)
@@ -1115,8 +1170,7 @@ class PlanActVerifyAgent:
             matched_block = content[start:end]
             new_text = self._align_indentation(matched_block, new_text)
             content = content[:start] + new_text + content[end:]
-            path.write_text(content, encoding="utf-8")
-            return f"Edited {file_rel} (fuzzy match, backup at {backup.name})"
+            return _write_and_cache(content, "fuzzy match")
 
         # 3. LLM-assisted re-plan: ask the model to find the correct span
         logger.warning(
@@ -1132,8 +1186,7 @@ class PlanActVerifyAgent:
                     corrected_old, corrected_new,
                 )
                 content = content.replace(corrected_old, corrected_new, 1)
-                path.write_text(content, encoding="utf-8")
-                return f"Edited {file_rel} (LLM re-plan, backup at {backup.name})"
+                return _write_and_cache(content, "LLM re-plan")
             # Corrected old still doesn't match — try fuzzy on the correction
             match_pos = self._fuzzy_find(content, corrected_old)
             if match_pos is not None:
@@ -1143,8 +1196,7 @@ class PlanActVerifyAgent:
                     matched_block, corrected_new,
                 )
                 content = content[:start] + corrected_new + content[end:]
-                path.write_text(content, encoding="utf-8")
-                return f"Edited {file_rel} (LLM re-plan + fuzzy, backup at {backup.name})"
+                return _write_and_cache(content, "LLM re-plan + fuzzy")
         except Exception as replan_exc:
             logger.warning("LLM re-plan failed for %s: %s", file_rel, replan_exc)
 
@@ -1322,6 +1374,12 @@ class PlanActVerifyAgent:
                 f'{{"old": "", "new": "", "error": "code beyond visible range"}}'
             )
         parts.append(f"```\n{truncated}\n```")
+
+        # Include scratchpad so LLM knows what steps already executed
+        scratchpad_ctx = self._scratchpad.to_context(last_n=5)
+        if scratchpad_ctx:
+            parts.append(f"\n{scratchpad_ctx}")
+
         parts.append(f"\nCHANGE REQUESTED:\n{change_description}")
         parts.append(
             f"\nProduce the edit as JSON: "
@@ -1723,11 +1781,12 @@ class PlanActVerifyAgent:
         project_context: str = "",
         on_token: Callable[[str], Any] | None = None,
         previous_attempts: list[str] | None = None,
+        changed_files: list[str] | None = None,
     ) -> AgentPlan:
         """Ask the model to produce a fix plan for *errors*.
 
-        Includes history of previous failed attempts to avoid repeating
-        the same fixes.
+        Includes history of previous failed attempts, scratchpad context,
+        and list of already-modified files to avoid repeating the same fixes.
         """
         user_msg = (
             f"Original task:\n{original_task}\n\n"
@@ -1735,6 +1794,18 @@ class PlanActVerifyAgent:
         )
         if project_context:
             user_msg += f"\n\nProject context:\n{project_context}"
+
+        # Inject scratchpad — gives LLM awareness of what was already done
+        scratchpad_ctx = self._scratchpad.to_context()
+        if scratchpad_ctx:
+            user_msg += f"\n\n{scratchpad_ctx}"
+
+        # Tell LLM which files were already modified
+        if changed_files:
+            user_msg += (
+                "\n\n📝 FILES ALREADY MODIFIED (content has changed — re-read before editing):\n"
+                + "\n".join(f"  - {f}" for f in changed_files)
+            )
 
         if previous_attempts:
             user_msg += (
@@ -1934,8 +2005,9 @@ class PlanActVerifyAgent:
             f"Implementation plan — {len(current_plan.steps)} steps", "done"
         )
 
-        # Clear file cache for fresh implementation
+        # Clear file cache and scratchpad for fresh implementation
         self._step_file_cache.clear()
+        self._scratchpad.clear()
 
         # Git transaction
         original_branch: str | None = None
@@ -1947,6 +2019,7 @@ class PlanActVerifyAgent:
             # Execute steps
             all_actions: list[ActionResult] = []
             heal_iterations = 0
+            prev_error_count: int | None = None  # no-progress detection
 
             for iteration in range(1 + self._max_heal):
                 changed_files: list[str] = []
@@ -1954,6 +2027,10 @@ class PlanActVerifyAgent:
                     await _notify(step.description, "running")
                     result = await self.act(step)
                     all_actions.append(result)
+                    self._scratchpad.record(
+                        step, result.success,
+                        output=result.output, error=result.error,
+                    )
                     status = "done" if result.success else "failed"
                     await _notify(step.description, status)
                     if result.success and step.action in ("edit_file", "create_file"):
@@ -1977,6 +2054,27 @@ class PlanActVerifyAgent:
                     break
 
                 if iteration < self._max_heal:
+                    # No-progress detection
+                    current_error_count = len(verification.errors)
+                    if prev_error_count is not None and current_error_count >= prev_error_count:
+                        logger.warning(
+                            "No progress in implement_proposals: errors %d → %d",
+                            prev_error_count, current_error_count,
+                        )
+                        await _notify(
+                            f"No progress (errors: {current_error_count}). Stopping.",
+                            "failed",
+                        )
+                        agent_result = AgentResult(
+                            plan=current_plan,
+                            actions=all_actions,
+                            verification=verification,
+                            heal_iterations=heal_iterations,
+                            final_success=False,
+                        )
+                        break
+                    prev_error_count = current_error_count
+
                     heal_iterations += 1
                     await _notify(
                         f"Self-healing (attempt {heal_iterations})…", "running"
@@ -1993,6 +2091,7 @@ class PlanActVerifyAgent:
                         current_plan = await self.self_heal(
                             verification.errors, impl_task, project_context,
                             previous_attempts=prev_attempts or None,
+                            changed_files=changed_files,
                         )
                         current_plan = self._ensure_reads_before_edits(current_plan)
                         await _notify(
@@ -2129,8 +2228,9 @@ class PlanActVerifyAgent:
         on_token: Callable[[str], Any] | None = None,
     ) -> AgentResult:
         """Core agent loop (extracted for git transaction wrapping)."""
-        # Clear file cache for fresh run
+        # Clear caches for fresh run
         self._step_file_cache.clear()
+        self._scratchpad.clear()
 
         # ---- Plan ----------------------------------------------------------
         await _notify("Planning…", "started")
@@ -2141,6 +2241,7 @@ class PlanActVerifyAgent:
 
         all_actions: list[ActionResult] = []
         heal_iterations = 0
+        prev_error_count: int | None = None  # for no-progress detection
 
         # Detect analysis-only plans (no edits/creates/deletes/commands)
         _mutating_actions = {"edit_file", "create_file", "delete_file", "run_command"}
@@ -2155,6 +2256,11 @@ class PlanActVerifyAgent:
                 await _notify(step.description, "running")
                 result = await self.act(step)
                 all_actions.append(result)
+                # Record into scratchpad for LLM context
+                self._scratchpad.record(
+                    step, result.success,
+                    output=result.output, error=result.error,
+                )
                 status = "done" if result.success else "failed"
                 await _notify(step.description, status)
                 if not result.success:
@@ -2229,6 +2335,21 @@ class PlanActVerifyAgent:
                     final_success=True,
                 )
 
+            # ---- No-progress detection ------------------------------------
+            current_error_count = len(verification.errors)
+            if prev_error_count is not None and current_error_count >= prev_error_count:
+                logger.warning(
+                    "No progress: error count %d → %d (not decreasing). "
+                    "Aborting heal loop.",
+                    prev_error_count, current_error_count,
+                )
+                await _notify(
+                    f"No progress after heal (errors: {current_error_count}). Stopping.",
+                    "failed",
+                )
+                break
+            prev_error_count = current_error_count
+
             # ---- Heal (if budget remains) ----------------------------------
             if iteration < self._max_heal:
                 heal_iterations += 1
@@ -2249,6 +2370,7 @@ class PlanActVerifyAgent:
                     current_plan = await self.self_heal(
                         verification.errors, task, project_context,
                         previous_attempts=prev_attempts or None,
+                        changed_files=changed_files,
                     )
                     current_plan = self._ensure_reads_before_edits(current_plan)
                     await _notify(
