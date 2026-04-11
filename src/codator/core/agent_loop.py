@@ -375,9 +375,11 @@ _ENV_ERROR_PATTERNS = [
     "Errno 13",
     "collection error",
     "CollectionError",
+    "ERROR collecting",
     "import file mismatch",
     "no module named",
     "ModuleNotFoundError",
+    "ImportError",
     "FileNotFoundError: [Errno 2]",
     "OSError: [Errno",
     "socket.error",
@@ -399,6 +401,9 @@ def classify_verification_errors(
     for err in errors:
         err_lower = err.lower()
         if any(pat.lower() in err_lower for pat in _ENV_ERROR_PATTERNS):
+            env_errors.append(err)
+        # pytest collection error summary lines: "ERROR path/to/test.py"
+        elif re.match(r"^ERROR\s+\S+\.py\s*$", err.strip()):
             env_errors.append(err)
         else:
             code_errors.append(err)
