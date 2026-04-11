@@ -238,3 +238,70 @@ class OllamaBackend(InferenceBackend):
     @property
     def model_name(self) -> str:
         return self._model
+
+    async def get_model_capabilities(self, model: str | None = None) -> dict[str, Any]:
+        """Query Ollama /api/show and return detected model capabilities.
+
+        Returns a dict with:
+          - tools: bool — native function/tool calling
+          - thinking: bool — chain-of-thought / reasoning mode
+          - system: bool — supports system prompts
+          - fim: bool — fill-in-middle code completion
+          - family: str — model family (qwen2, gemma4, llama, etc.)
+          - architecture: str — model architecture
+          - quantization: str — quantization level
+          - suggested_role: str — "architect", "editor", "general", or "both"
+        """
+        import httpx
+        model = model or self._model
+        caps: dict[str, Any] = {
+            "tools": False,
+            "thinking": False,
+            "system": False,
+            "fim": False,
+            "family": "unknown",
+            "architecture": "unknown",
+            "quantization": "unknown",
+            "suggested_role": "general",
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{self._base_url}/api/show",
+                    json={"name": model},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            tmpl = data.get("template", "")
+            details = data.get("details", {})
+            info = data.get("model_info", {})
+
+            caps["tools"] = ".Tools" in tmpl or "tool_call" in tmpl
+            caps["thinking"] = (
+                "think" in tmpl.lower()
+                or "/think" in tmpl.lower()
+                or "r1" in model.lower()
+                or "deepseek-r1" in model.lower()
+            )
+            caps["system"] = ".System" in tmpl or "system" in tmpl.lower()
+            caps["fim"] = "fim_prefix" in tmpl or "fim_middle" in tmpl
+            caps["family"] = details.get("family", "unknown")
+            caps["architecture"] = info.get("general.architecture", "unknown")
+            caps["quantization"] = details.get("quantization_level", "unknown")
+
+            # Suggest role based on capabilities
+            if caps["tools"] and not caps["thinking"]:
+                caps["suggested_role"] = "editor"
+            elif caps["thinking"] and not caps["tools"]:
+                caps["suggested_role"] = "architect"
+            elif caps["tools"] and caps["thinking"]:
+                caps["suggested_role"] = "both"
+            else:
+                caps["suggested_role"] = "general"
+
+        except Exception as exc:
+            logger.warning("Failed to get capabilities for %s: %s", model, exc)
+
+        return caps

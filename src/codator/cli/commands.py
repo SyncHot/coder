@@ -181,35 +181,77 @@ async def _handle_log(arg: str) -> None:
 
 
 async def _handle_model_picker(engine: ChatEngine) -> None:
-    """Interactive model picker — lists available Ollama models, user picks by number."""
+    """Interactive model picker — lists available Ollama models with capabilities."""
     from codator.infrastructure.ollama_backend import OllamaBackend
     from rich.table import Table
 
     print_info("Fetching available models from Ollama...")
     backend = OllamaBackend(engine._settings)
     models = await backend.list_models()
-    await backend.close()
 
     if not models:
+        await backend.close()
         print_error("No models found. Is Ollama running?")
         return
 
-    # Sort by name, show table with numbers
+    # Sort by name, detect capabilities for each
     models.sort(key=lambda m: m.get("name", ""))
+    caps_list = []
+    for m in models:
+        caps = await backend.get_model_capabilities(m.get("name", ""))
+        caps_list.append(caps)
+    await backend.close()
+
+    # Role icons
+    _role_icons = {
+        "architect": "🧠",
+        "editor": "✏️",
+        "both": "🧠✏️",
+        "general": "💬",
+    }
+
     table = Table(title="Available Models", border_style="cyan")
     table.add_column("#", style="bold yellow", justify="right")
     table.add_column("Name", style="bold")
     table.add_column("Size")
+    table.add_column("Capabilities", style="dim")
+    table.add_column("Role", style="cyan")
 
-    for i, m in enumerate(models, 1):
+    for i, (m, caps) in enumerate(zip(models, caps_list), 1):
         name = m.get("name", "?")
         size_bytes = m.get("size", 0)
         size_gb = f"{size_bytes / 1_073_741_824:.1f} GB"
         active = " ← active" if name == engine.active_model else ""
-        table.add_row(str(i), f"{name}{active}", size_gb)
+        arch_mark = " ← architect" if name == engine.architect_model else ""
+
+        # Capability badges
+        badges = []
+        if caps["tools"]:
+            badges.append("🔧tools")
+        if caps["thinking"]:
+            badges.append("💭think")
+        if caps["system"]:
+            badges.append("📋sys")
+        if caps["fim"]:
+            badges.append("📝fim")
+
+        role = caps["suggested_role"]
+        role_display = f"{_role_icons.get(role, '')} {role}"
+
+        table.add_row(
+            str(i),
+            f"{name}{active}{arch_mark}",
+            size_gb,
+            " ".join(badges) if badges else "basic",
+            role_display,
+        )
 
     console.print(table)
-    console.print("[dim]Enter number to switch, or press Enter to cancel:[/dim]")
+    console.print(
+        "[dim]Enter number to switch editor model, "
+        "'a<number>' to set as architect (e.g. a2), "
+        "or Enter to cancel:[/dim]"
+    )
 
     import asyncio
     try:
@@ -224,6 +266,28 @@ async def _handle_model_picker(engine: ChatEngine) -> None:
         print_info("Cancelled.")
         return
 
+    # Check for architect selection: a1, a2, etc.
+    if choice.lower().startswith("a") and choice[1:].isdigit():
+        idx = int(choice[1:]) - 1
+        if idx < 0 or idx >= len(models):
+            print_error(f"Invalid choice. Pick a1-a{len(models)}.")
+            return
+        selected = models[idx]["name"]
+        engine.architect_model = selected
+        engine.set_mode("agent")
+        caps = caps_list[idx]
+        if not caps["thinking"]:
+            console.print(
+                f"  [yellow]⚠  Note: {selected} has no thinking mode. "
+                f"Reasoning models (deepseek-r1, qwen3) work best as architect.[/yellow]"
+            )
+        print_info(
+            f"🏗️  Set **{selected}** as architect model.\n"
+            f"   Editor: **{engine.active_model}**\n"
+            f"   Auto-switched to agent mode."
+        )
+        return
+
     try:
         idx = int(choice) - 1
         if idx < 0 or idx >= len(models):
@@ -236,6 +300,16 @@ async def _handle_model_picker(engine: ChatEngine) -> None:
         return
 
     selected = models[idx]["name"]
+    caps = caps_list[idx]
+
+    # If user picks a thinking-only model as editor, suggest architect role
+    if caps["thinking"] and not caps["tools"]:
+        console.print(
+            f"  [yellow]💡 {selected} is a reasoning model (no tool support). "
+            f"Consider using it as architect instead:[/yellow]\n"
+            f"  [dim]   /architect {selected}[/dim]"
+        )
+
     result = await engine.switch_ollama_model(selected)
     print_info(result)
 
@@ -407,6 +481,29 @@ async def _handle_ollama(arg: str, engine: ChatEngine) -> None:
                 return
             result = await engine.switch_ollama_model(rest)
             print_info(result)
+
+        case "caps" | "capabilities" | "info":
+            target = rest or engine.active_model
+            if not target:
+                print_error("Usage: /ollama caps [model-name]")
+                return
+            print_info(f"Detecting capabilities for **{target}**...")
+            backend = OllamaBackend(engine._settings)
+            caps = await backend.get_model_capabilities(target)
+            await backend.close()
+
+            _icons = {"architect": "🧠", "editor": "✏️", "both": "🧠✏️", "general": "💬"}
+            lines = [
+                f"  Model: **{target}**",
+                f"  Family: {caps['family']} ({caps['architecture']})",
+                f"  Quant: {caps['quantization']}",
+                f"  🔧 Tool calling: {'✅' if caps['tools'] else '❌'}",
+                f"  💭 Thinking/reasoning: {'✅' if caps['thinking'] else '❌'}",
+                f"  📋 System prompts: {'✅' if caps['system'] else '❌'}",
+                f"  📝 Fill-in-Middle: {'✅' if caps['fim'] else '❌'}",
+                f"  Suggested role: {_icons.get(caps['suggested_role'], '')} **{caps['suggested_role']}**",
+            ]
+            print_info("\n".join(lines))
 
         case _:
             # Treat as model name shortcut: /ollama qwen2.5-coder:14b
