@@ -799,6 +799,8 @@ async def run_agent_task(task: str, engine: ChatEngine) -> None:
     except Exception as exc:
         _stop_thinking()
         print_error(f"Agent failed: {exc}")
+    finally:
+        await agent.close()
 
 
 def _build_project_context(engine: ChatEngine) -> str:

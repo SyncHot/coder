@@ -678,6 +678,17 @@ class PlanActVerifyAgent:
         self._grep = GrepTool(project_root=str(self._project_root))
         self._glob = GlobTool(project_root=str(self._project_root))
 
+        # Persistent HTTP client for Ollama API (connection pooling)
+        self._http_client: httpx.AsyncClient | None = None
+        self._http_timeout = httpx.Timeout(
+            connect=30.0, read=600.0, write=30.0, pool=30.0,
+        )
+
+        # Step context accumulator — tracks file contents read during plan
+        # execution so that subsequent edit steps can access them without
+        # re-reading and can include them in LLM prompts for better edits.
+        self._step_file_cache: dict[str, str] = {}
+
     @property
     def architect_model(self) -> str | None:
         """Return the current architect model (None if not set)."""
@@ -686,6 +697,22 @@ class PlanActVerifyAgent:
     @architect_model.setter
     def architect_model(self, value: str | None) -> None:
         self._architect_model = value
+
+    # -- HTTP client lifecycle -----------------------------------------------
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        """Return the persistent HTTP client, creating one if needed."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(
+                base_url=self._base_url, timeout=self._http_timeout,
+            )
+        return self._http_client
+
+    async def close(self) -> None:
+        """Close the persistent HTTP client."""
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
 
     # -- helpers -------------------------------------------------------------
 
@@ -730,39 +757,33 @@ class PlanActVerifyAgent:
         if force_json:
             payload["format"] = "json"
 
-        timeout = httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0)
+        client = await self._get_http_client()
 
         if on_token is None:
             # Non-streaming (original path)
-            async with httpx.AsyncClient(
-                base_url=self._base_url, timeout=timeout
-            ) as client:
-                resp = await client.post("/api/chat", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
+            resp = await client.post("/api/chat", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
             return data["message"]["content"]
 
         # Streaming path — yield tokens via callback
         chunks: list[str] = []
-        async with httpx.AsyncClient(
-            base_url=self._base_url, timeout=timeout
-        ) as client:
-            async with client.stream("POST", "/api/chat", json=payload) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        logger.debug("Skipping malformed JSON line in stream: %s", line[:200])
-                        continue
-                    token = obj.get("message", {}).get("content", "")
-                    if token:
-                        chunks.append(token)
-                        result = on_token(token)
-                        if asyncio.iscoroutine(result):
-                            await result
+        async with client.stream("POST", "/api/chat", json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.debug("Skipping malformed JSON line in stream: %s", line[:200])
+                    continue
+                token = obj.get("message", {}).get("content", "")
+                if token:
+                    chunks.append(token)
+                    result = on_token(token)
+                    if asyncio.iscoroutine(result):
+                        await result
         return "".join(chunks)
 
     @staticmethod
@@ -1027,7 +1048,10 @@ class PlanActVerifyAgent:
 
     async def _act_read_file(self, step: AgentStep) -> str:
         path = self._safe_path(step.target)
-        return path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8")
+        # Cache for use by subsequent edit steps
+        self._step_file_cache[step.target] = content
+        return content
 
     async def _act_edit_file(self, step: AgentStep) -> str:
         # Handle both JSON string and dict descriptions
@@ -1271,26 +1295,40 @@ class PlanActVerifyAgent:
     ) -> dict:
         """Generate a precise {old, new} edit from a prose description.
 
-        This is the key innovation: the plan step only needs to describe
-        WHAT to change in plain English. This method reads the file and
-        asks the LLM to produce the exact old/new text.
+        Uses the step file cache when available to avoid re-reading disk.
+        Includes truncation warnings so the LLM knows if context is partial.
         """
-        path = self._safe_path(file_rel)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
+        # Use cached content from a prior read_file step if available
+        if file_rel in self._step_file_cache:
+            file_content = self._step_file_cache[file_rel]
+        else:
+            path = self._safe_path(file_rel)
+            if not path.exists():
+                raise FileNotFoundError(f"File not found: {path}")
+            file_content = path.read_text(encoding="utf-8")
 
-        file_content = path.read_text(encoding="utf-8")
-        # Truncate very large files to stay within context
+        total_lines = file_content.count("\n") + 1
         max_chars = self._num_ctx * 3
         truncated = file_content[:max_chars]
+        is_truncated = len(file_content) > max_chars
+        shown_lines = truncated.count("\n") + 1
 
-        user_msg = (
-            f"FILE: {file_rel}\n"
-            f"```\n{truncated}\n```\n\n"
-            f"CHANGE REQUESTED:\n{change_description}\n\n"
-            f"Produce the edit as JSON: "
+        # Build prompt with file content and truncation warning
+        parts = [f"FILE: {file_rel} ({total_lines} lines)"]
+        if is_truncated:
+            parts.append(
+                f"⚠️ FILE TRUNCATED: showing lines 1-{shown_lines} of {total_lines}. "
+                f"If the code to change is not visible, return: "
+                f'{{"old": "", "new": "", "error": "code beyond visible range"}}'
+            )
+        parts.append(f"```\n{truncated}\n```")
+        parts.append(f"\nCHANGE REQUESTED:\n{change_description}")
+        parts.append(
+            f"\nProduce the edit as JSON: "
             f'{{\"old\": \"exact text from file\", \"new\": \"replacement text\"}}'
         )
+
+        user_msg = "\n".join(parts)
 
         logger.info("Generating edit for %s via LLM", file_rel)
         raw = await self._ollama_chat(
@@ -1321,11 +1359,21 @@ class PlanActVerifyAgent:
         Raises ValueError if the LLM cannot find a match.
         """
         # Truncate very large files to stay within context
-        max_chars = self._num_ctx * 3  # rough chars-to-tokens ratio
+        max_chars = self._num_ctx * 3
+        total_lines = file_content.count("\n") + 1
         truncated = file_content[:max_chars]
+        is_truncated = len(file_content) > max_chars
+        shown_lines = truncated.count("\n") + 1
+
+        trunc_note = ""
+        if is_truncated:
+            trunc_note = (
+                f"\n⚠️ FILE TRUNCATED: showing lines 1-{shown_lines} "
+                f"of {total_lines}.\n"
+            )
 
         user_msg = (
-            f"FILE: {file_rel}\n"
+            f"FILE: {file_rel} ({total_lines} lines){trunc_note}\n"
             f"```\n{truncated}\n```\n\n"
             f"INTENDED EDIT (old text did NOT match the file):\n"
             f"old: ```\n{old_text}\n```\n"
@@ -1435,11 +1483,14 @@ class PlanActVerifyAgent:
         return "python"  # default fallback
 
     async def verify(self, language: str = "", changed_files: list[str] | None = None) -> VerifyResult:
-        """Run linting and tests to verify project health.
+        """Run tiered verification to catch errors efficiently.
+
+        Tier 1: Syntax check on changed files only (fast, <5s)
+        Tier 2: Lint changed files only (medium, <30s)
+        Tier 3: Full test suite (slow, skipped if no test dir)
 
         Uses smart error classification: environment errors (PermissionError,
-        CollectionError, etc.) are reported as warnings, not hard failures,
-        unless the changed files have syntax errors.
+        CollectionError, etc.) are reported as warnings, not hard failures.
         """
         if not language:
             language = self._detect_language()
@@ -1447,18 +1498,35 @@ class PlanActVerifyAgent:
         errors: list[str] = []
         warnings: list[str] = []
 
-        verifiers = {
-            "python": self._verify_python,
+        # ---- Tier 1: Syntax check changed files (fast) ----
+        if changed_files and language == "python":
+            syntax_errors = await self._check_python_syntax(changed_files)
+            if syntax_errors:
+                # Fail fast — no point running lint/tests with syntax errors
+                return VerifyResult(
+                    success=False, errors=syntax_errors, warnings=[]
+                )
+
+        # ---- Tier 2: Targeted lint on changed files ----
+        verifiers_targeted = {
+            "python": self._verify_python_lint,
             "javascript": self._verify_javascript,
             "go": self._verify_go,
             "rust": self._verify_rust,
         }
+        verifier_lint = verifiers_targeted.get(language)
+        if verifier_lint:
+            lint_errors, lint_warnings = await verifier_lint(
+                changed_files=changed_files
+            )
+            errors.extend(lint_errors)
+            warnings.extend(lint_warnings)
 
-        verifier = verifiers.get(language)
-        if verifier:
-            errors, warnings = await verifier()
-        else:
-            logger.warning("No verification rules for language %r", language)
+        # ---- Tier 3: Full test suite (only if lint passes) ----
+        if not errors and language == "python":
+            test_errors, test_warnings = await self._verify_python_tests()
+            errors.extend(test_errors)
+            warnings.extend(test_warnings)
 
         # Smart classification: separate env errors from code errors
         code_errors, env_errors = classify_verification_errors(errors)
@@ -1471,22 +1539,28 @@ class PlanActVerifyAgent:
             for e in env_errors:
                 warnings.append(f"[ENV] {e}")
 
-        # If only env errors remain, check syntax of changed files as safety net
-        if env_errors and not code_errors and changed_files and language == "python":
-            syntax_errors = await self._check_python_syntax(changed_files)
-            code_errors.extend(syntax_errors)
-
         success = len(code_errors) == 0
         return VerifyResult(success=success, errors=code_errors, warnings=warnings)
 
-    async def _verify_python(self) -> tuple[list[str], list[str]]:
+    async def _verify_python_lint(
+        self, changed_files: list[str] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """Tier 2: ruff check — targeted to changed files when possible."""
         errors: list[str] = []
         warnings: list[str] = []
 
-        # --- ruff (skip if not installed) ---
-        ruff_result = await self._run_quiet("ruff check .")
+        # Build ruff command — target changed files if available
+        if changed_files:
+            py_files = [f for f in changed_files if f.endswith(".py")]
+            if not py_files:
+                return errors, warnings
+            targets = " ".join(py_files)
+            cmd = f"ruff check {targets}"
+        else:
+            cmd = "ruff check ."
+
+        ruff_result = await self._run_quiet(cmd)
         if ruff_result is not None:
-            # If ruff is not installed, ignore entirely
             if "not found" in ruff_result or "No such file" in ruff_result:
                 logger.info("ruff not available — skipping lint verification")
             else:
@@ -1499,27 +1573,34 @@ class PlanActVerifyAgent:
                         for p in ("Found", "All checks", "[")
                     ):
                         continue
-                    # ruff marks warnings with codes starting with W or D
                     if ": W" in stripped or ": D" in stripped:
                         warnings.append(stripped)
                     else:
                         errors.append(stripped)
 
-        # --- pytest (only if tests/ exists and pytest is available) ---
+        return errors, warnings
+
+    async def _verify_python_tests(self) -> tuple[list[str], list[str]]:
+        """Tier 3: Run pytest if tests/ directory exists."""
+        errors: list[str] = []
+        warnings: list[str] = []
+
         tests_dir = self._project_root / "tests"
-        if tests_dir.is_dir():
-            pytest_result = await self._run_quiet(
-                "python -m pytest --tb=short -q"
-            )
-            if pytest_result is not None and "not found" not in pytest_result:
-                for line in pytest_result.splitlines():
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    if "FAILED" in stripped or "ERROR" in stripped:
-                        errors.append(stripped)
-                    elif "warning" in stripped.lower():
-                        warnings.append(stripped)
+        if not tests_dir.is_dir():
+            return errors, warnings
+
+        pytest_result = await self._run_quiet(
+            "python -m pytest --tb=short -q"
+        )
+        if pytest_result is not None and "not found" not in pytest_result:
+            for line in pytest_result.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if "FAILED" in stripped or "ERROR" in stripped:
+                    errors.append(stripped)
+                elif "warning" in stripped.lower():
+                    warnings.append(stripped)
 
         return errors, warnings
 
@@ -1540,7 +1621,7 @@ class PlanActVerifyAgent:
                 logger.warning("Syntax error detected in %s", rel_path)
         return syntax_errors
 
-    async def _verify_javascript(self) -> tuple[list[str], list[str]]:
+    async def _verify_javascript(self, changed_files: list[str] | None = None) -> tuple[list[str], list[str]]:
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -1575,7 +1656,7 @@ class PlanActVerifyAgent:
 
         return errors, warnings
 
-    async def _verify_go(self) -> tuple[list[str], list[str]]:
+    async def _verify_go(self, changed_files: list[str] | None = None) -> tuple[list[str], list[str]]:
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -1599,7 +1680,7 @@ class PlanActVerifyAgent:
 
         return errors, warnings
 
-    async def _verify_rust(self) -> tuple[list[str], list[str]]:
+    async def _verify_rust(self, changed_files: list[str] | None = None) -> tuple[list[str], list[str]]:
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -1848,9 +1929,13 @@ class PlanActVerifyAgent:
             use_architect=True,
         )
         current_plan = self._parse_plan(raw, impl_task)
+        current_plan = self._ensure_reads_before_edits(current_plan)
         await _notify(
             f"Implementation plan — {len(current_plan.steps)} steps", "done"
         )
+
+        # Clear file cache for fresh implementation
+        self._step_file_cache.clear()
 
         # Git transaction
         original_branch: str | None = None
@@ -1909,6 +1994,7 @@ class PlanActVerifyAgent:
                             verification.errors, impl_task, project_context,
                             previous_attempts=prev_attempts or None,
                         )
+                        current_plan = self._ensure_reads_before_edits(current_plan)
                         await _notify(
                             f"Heal plan — {len(current_plan.steps)} steps", "done"
                         )
@@ -1995,6 +2081,46 @@ class PlanActVerifyAgent:
 
         return agent_result
 
+    @staticmethod
+    def _ensure_reads_before_edits(plan: AgentPlan) -> AgentPlan:
+        """Auto-insert read_file steps before edit_file if file wasn't read yet.
+
+        Models often forget the "read first" rule. This ensures the agent
+        always has file content cached before attempting an edit.
+        """
+        read_targets: set[str] = set()
+        fixed_steps: list[AgentStep] = []
+        next_index = 0
+
+        for step in plan.steps:
+            if step.action in ("read_file", "analyze"):
+                read_targets.add(step.target)
+            elif step.action == "edit_file" and step.target not in read_targets:
+                # Insert a read_file step before the edit
+                read_step = AgentStep(
+                    index=next_index,
+                    action="read_file",
+                    target=step.target,
+                    description=f"Read {step.target} before editing",
+                )
+                fixed_steps.append(read_step)
+                read_targets.add(step.target)
+                next_index += 1
+                logger.info(
+                    "Auto-inserted read_file for %s before edit_file",
+                    step.target,
+                )
+
+            step.index = next_index
+            fixed_steps.append(step)
+            next_index += 1
+
+        return AgentPlan(
+            task=plan.task,
+            steps=fixed_steps,
+            reasoning=plan.reasoning,
+        )
+
     async def _run_inner(
         self,
         task: str,
@@ -2003,10 +2129,14 @@ class PlanActVerifyAgent:
         on_token: Callable[[str], Any] | None = None,
     ) -> AgentResult:
         """Core agent loop (extracted for git transaction wrapping)."""
+        # Clear file cache for fresh run
+        self._step_file_cache.clear()
+
         # ---- Plan ----------------------------------------------------------
         await _notify("Planning…", "started")
         # Don't stream plan — internal JSON, not user-facing text
         current_plan = await self.plan(task, project_context)
+        current_plan = self._ensure_reads_before_edits(current_plan)
         await _notify(f"Plan ready — {len(current_plan.steps)} steps", "done")
 
         all_actions: list[ActionResult] = []
@@ -2120,6 +2250,7 @@ class PlanActVerifyAgent:
                         verification.errors, task, project_context,
                         previous_attempts=prev_attempts or None,
                     )
+                    current_plan = self._ensure_reads_before_edits(current_plan)
                     await _notify(
                         f"Heal plan ready — {len(current_plan.steps)} steps", "done"
                     )
