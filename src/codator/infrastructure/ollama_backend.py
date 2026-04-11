@@ -27,6 +27,7 @@ class OllamaBackend(InferenceBackend):
         self._base_url = self._settings.ollama.base_url.rstrip("/")
         self._num_ctx = num_ctx
         self._client = None
+        self._supports_tools = True  # assume yes; auto-detected on first call
 
     def _ensure_client(self):
         if self._client is None:
@@ -75,7 +76,7 @@ class OllamaBackend(InferenceBackend):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        if tools:
+        if tools and self._supports_tools:
             kwargs["tools"] = tools
         if self._num_ctx:
             kwargs["extra_body"] = {"num_ctx": self._num_ctx}
@@ -84,9 +85,19 @@ class OllamaBackend(InferenceBackend):
         try:
             response = await self._client.chat.completions.create(**kwargs)
         except Exception as e:
+            # Some models (e.g. deepseek-r1) don't support native tool calling.
+            # Retry without tools — text-based tool parsing will handle it.
+            if "does not support tools" in str(e) and "tools" in kwargs:
+                logger.warning(
+                    "Model %s does not support tools, falling back to text mode",
+                    self._model,
+                )
+                self._supports_tools = False
+                del kwargs["tools"]
+                response = await self._client.chat.completions.create(**kwargs)
             # Ollama returns 500 when num_ctx is too large for available memory.
             # Retry with progressively smaller context until it works.
-            if "500" in str(e) and self._num_ctx and self._num_ctx > 4096:
+            elif "500" in str(e) and self._num_ctx and self._num_ctx > 4096:
                 original_ctx = self._num_ctx
                 while self._num_ctx > 4096:
                     self._num_ctx = max(4096, self._num_ctx // 2)
@@ -170,10 +181,15 @@ class OllamaBackend(InferenceBackend):
         """Switch to a different model without recreating the HTTP client."""
         self._model = model
         self._num_ctx = num_ctx
+        self._supports_tools = True  # reset — new model may support tools
 
     @property
     def num_ctx(self) -> int:
         return self._num_ctx
+
+    @property
+    def supports_tools(self) -> bool:
+        return self._supports_tools
 
     async def get_model_context_length(self, model: str | None = None) -> int:
         """Query Ollama /api/show for the model's native context length."""
