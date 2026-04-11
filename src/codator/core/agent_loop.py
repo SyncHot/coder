@@ -502,6 +502,18 @@ class StepScratchpad:
         entries = self._entries[-last_n:]
         return "AGENT PROGRESS SO FAR:\n" + "\n".join(entries)
 
+    def status_report(self, changed_files: list[str] | None = None,
+                      errors: list[str] | None = None,
+                      next_step: str = "") -> str:
+        """Compact STATUS line for progress tracking."""
+        files_str = ", ".join(changed_files) if changed_files else "none"
+        err_str = str(len(errors)) if errors else "0"
+        return (
+            f"STATUS: [Modified: {files_str}] | "
+            f"[Errors: {err_str}] | "
+            f"[Next: {next_step or 'done'}]"
+        )
+
     def clear(self) -> None:
         """Reset the scratchpad for a new plan execution."""
         self._entries.clear()
@@ -516,74 +528,62 @@ class StepScratchpad:
 # ---------------------------------------------------------------------------
 
 _PLAN_SYSTEM = """\
-Coding assistant — produces structured plans.
-Given a task and optional project context, return a JSON object with:
+Precise coding planner. Produce MINIMAL step sequences — no filler, no redundancy.
+
+Think before acting (internal reasoning goes in "reasoning" field):
+- THOUGHT: What files are involved? What's the data flow?
+- CONSTRAINT: Never edit without reading first. Never guess paths.
+- STRATEGY: Fewest steps that achieve the goal correctly.
+
+Return JSON:
 {
-  "task": "<restate the task concisely>",
-  "reasoning": "<brief explanation of your approach>",
+  "task": "<concise restatement>",
+  "reasoning": "<your thought process — what you checked, why this approach>",
   "steps": [
     {"action": "<read_file|edit_file|create_file|run_command|delete_file|analyze|grep|glob>",
      "target": "<file path, shell command, regex pattern, or glob pattern>",
-     "description": "<what this step does>"}
+     "description": "<what this step achieves>"}
   ]
 }
 
-Rules:
-- Only use the eight allowed actions.
-- **ALWAYS start by reading the relevant files first** before editing or running commands.
-- If the task is a question, review, or analysis (e.g. "what can be improved",
-  "check this file", "review the code"), use only read_file, analyze, grep, and glob actions.
-  Do NOT edit or run commands for analytical tasks.
-- The "analyze" action takes a file path as target and a description of what to
-  look for. It is read-only and produces observations — no changes.
-- The "grep" action searches for a regex pattern in the codebase. Target is the
-  regex pattern. Description can be a JSON string with optional "path" (directory
-  to search in) and "glob" (file filter, e.g. "*.py") keys.
-- The "glob" action finds files matching a name pattern. Target is the glob
-  pattern (e.g. "**/*.py", "src/**/*.ts"). Description can be a JSON string with
-  an optional "path" (directory to search in) key.
-- Use grep to search for code patterns, function definitions, or imports.
-  Use glob to find files by name.
-- **Use the project file tree provided in context to find correct file paths.**
-  Never guess file paths — always refer to the actual files listed in the project context.
-- File paths must be relative to the project root.
-- For edit_file: the description should explain WHAT to change in plain text.
-  Example: {"action":"edit_file","target":"app.py","description":"Add error handling to the connect function"}
-  You can OPTIONALLY provide JSON: {"file":"path","old":"exact text","new":"new text"}
-  But plain English is preferred — the system will generate the precise edit.
-- Keep plans minimal — only steps that are necessary.
-- Return ONLY valid JSON, no markdown fences.
+Hard rules:
+- 8 allowed actions ONLY: read_file, edit_file, create_file, run_command, delete_file, analyze, grep, glob.
+- ALWAYS read_file BEFORE edit_file. No exceptions.
+- Analysis tasks (questions, reviews, "what to improve") → read_file + analyze + grep/glob ONLY. No mutations.
+- grep: target=regex, description can be JSON {"path":"dir","glob":"*.py"}.
+- glob: target=pattern (e.g. "**/*.py"), description can be JSON {"path":"dir"}.
+- Paths are RELATIVE to project root. Use the file tree in context — never invent paths.
+- edit_file description: plain English explaining the change. Optionally JSON {"file":"path","old":"...","new":"..."}.
+- Minimize steps. If 3 steps suffice, don't produce 7.
+- Return ONLY valid JSON. No markdown fences. No commentary.
 """
 
 _HEAL_SYSTEM = """\
-Coding assistant — fixes errors.
-Given the original task, the errors encountered, and optional project context,
-produce a new JSON plan to fix the errors.
+Error recovery agent. Your prior approach failed. Fix it NOW — different strategy.
 
-You MUST use this exact JSON schema:
+Schema:
 {
   "task": "<fix description>",
-  "reasoning": "<what went wrong and how to fix>",
-  "steps": [
-    {"action": "read_file", "target": "path/to/file.py", "description": "Read file before editing"},
-    {"action": "edit_file", "target": "path/to/file.py", "description": "Fix the broken import by changing X to Y"},
-    {"action": "run_command", "target": "chmod u+rw path/to/file.py", "description": "Fix permissions"},
-    {"action": "grep", "target": "pattern", "description": "Search for code"},
-    {"action": "analyze", "target": "path/to/file.py", "description": "Analyze code"}
-  ]
+  "reasoning": "<root cause analysis — WHY it failed, not just WHAT failed>",
+  "steps": [...]
 }
 
-CRITICAL RULES:
-- Each step MUST have "action", "target", and "description" fields.
-- Valid actions: read_file, edit_file, create_file, run_command, delete_file, analyze, grep, glob.
-- ALWAYS read_file before edit_file.
-- For edit_file: describe WHAT to change in plain text. The system will generate precise edits.
-- If a file was already modified (listed in "FILES ALREADY MODIFIED"), its content
-  has CHANGED. You MUST re-read it before editing — do NOT assume old content.
-- NEVER repeat an edit that already failed with "text not found" — try a different approach.
-- If the same error persists after 2 attempts, try a COMPLETELY different strategy
-  (different file, different function, or alternative implementation).
-- Return ONLY valid JSON, no markdown fences.
+Protocol:
+1. DIAGNOSE: Read the "AGENT PROGRESS" section. Identify the pattern of failure.
+2. PIVOT: If the same file/approach failed twice → CHANGE STRATEGY ENTIRELY.
+   Different function, different file, alternative algorithm.
+3. EXECUTE: read_file FIRST (always), then edit_file with correct content.
+
+Anti-patterns (INSTANT FAILURE if you do these):
+- Repeating an edit that returned "text not found" → FORBIDDEN.
+- Editing a file listed in "FILES ALREADY MODIFIED" without re-reading it → FORBIDDEN.
+- Producing the same plan as a previous failed attempt → FORBIDDEN.
+- Installing a package that doesn't exist (use stdlib alternatives) → FORBIDDEN.
+- Generating non-JSON output → FORBIDDEN.
+
+Valid actions: read_file, edit_file, create_file, run_command, delete_file, analyze, grep, glob.
+Each step MUST have "action", "target", "description" fields.
+Return ONLY valid JSON. No markdown fences.
 """
 
 _PROPOSE_SYSTEM = """\
@@ -633,52 +633,39 @@ RULES:
 """
 
 _IMPLEMENT_SYSTEM = """\
-Coding assistant — implements specific changes.
-Given one or more proposals to implement, produce
-the necessary plan steps (read_file first, then edit_file).
+Implementation engine. Given proposals, produce the execution plan.
 
-You also have read-only grep and glob actions to find code before editing:
-- "grep": target is a regex pattern; description can be JSON with "path" and "glob" keys.
-- "glob": target is a glob pattern (e.g. "**/*.py"); description can be JSON with a "path" key.
-
-Return JSON with the same schema as a planning response:
+Return JSON:
 {
   "task": "<implementation summary>",
-  "reasoning": "<approach>",
+  "reasoning": "<approach — what you'll change and why>",
   "steps": [
-    {"action": "grep", "target": "def my_function", "description": "Find function definition"},
-    {"action": "read_file", "target": "path", "description": "Read file before editing"},
-    {"action": "edit_file", "target": "path", "description": "Add caching to the HLS process startup"}
+    {"action": "grep", "target": "def my_function", "description": "Locate function"},
+    {"action": "read_file", "target": "path", "description": "Read before editing"},
+    {"action": "edit_file", "target": "path", "description": "What to change"}
   ]
 }
 
 Rules:
-- ALWAYS read_file first before editing.
-- Use grep/glob to locate code when you are unsure of exact file paths or positions.
-- For edit_file: the description should explain WHAT to change (plain text is fine).
-  If you can, provide JSON: {"file":"path","old":"exact old text","new":"new text"}
-  But a plain English description is also acceptable — the system will generate the edit.
-- File paths must be relative to the project root.
-- Return ONLY valid JSON, no markdown fences.
+- read_file BEFORE edit_file. Always.
+- Use grep/glob when unsure of exact paths or positions.
+- edit_file description: plain English or JSON {"file":"path","old":"exact","new":"replacement"}.
+- Paths relative to project root.
+- Return ONLY valid JSON. No fences.
 """
 
 _GENERATE_EDIT_SYSTEM = """\
-You are a precise code editor. You will be given:
-1. The ACTUAL content of a source file.
-2. A description of the change to make.
+Precise code editor. Given file content + change description, return ONE edit.
 
-Your job: produce an edit as JSON:
-{"old": "<exact text from the file to replace>", "new": "<replacement text>"}
+Output JSON:
+{"old": "<exact text from file to replace>", "new": "<replacement>"}
 
-RULES:
-- The "old" field MUST be copied character-for-character from the actual file
-  content — including indentation, whitespace, and blank lines.
-- Keep "old" as SHORT as possible — only the lines that need to change plus
-  1-2 lines of context above and below for uniqueness.
-- The "new" field is the replacement for the "old" text.
-- Return ONLY the JSON object, no markdown fences or explanation.
-- If the change is not applicable to this file, return:
-  {"old": "", "new": "", "error": "change not applicable"}
+Rules:
+- "old" MUST be character-for-character from the file. Whitespace, indentation, blank lines — exact.
+- "old" must be MINIMAL — only lines that change + 1-2 context lines for uniqueness.
+- "new" achieves the described change.
+- If not applicable: {"old": "", "new": "", "error": "change not applicable"}
+- ONLY JSON. No fences. No explanation.
 """
 
 
@@ -2327,6 +2314,9 @@ class PlanActVerifyAgent:
             )
 
             if verification.success:
+                logger.info(
+                    self._scratchpad.status_report(changed_files, None, "done")
+                )
                 return AgentResult(
                     plan=current_plan,
                     actions=all_actions,
@@ -2338,10 +2328,13 @@ class PlanActVerifyAgent:
             # ---- No-progress detection ------------------------------------
             current_error_count = len(verification.errors)
             if prev_error_count is not None and current_error_count >= prev_error_count:
+                status = self._scratchpad.status_report(
+                    changed_files, verification.errors, "ABORTED — no progress"
+                )
                 logger.warning(
                     "No progress: error count %d → %d (not decreasing). "
-                    "Aborting heal loop.",
-                    prev_error_count, current_error_count,
+                    "Aborting heal loop. %s",
+                    prev_error_count, current_error_count, status,
                 )
                 await _notify(
                     f"No progress after heal (errors: {current_error_count}). Stopping.",
@@ -2353,6 +2346,12 @@ class PlanActVerifyAgent:
             # ---- Heal (if budget remains) ----------------------------------
             if iteration < self._max_heal:
                 heal_iterations += 1
+                logger.info(
+                    self._scratchpad.status_report(
+                        changed_files, verification.errors,
+                        f"heal attempt {heal_iterations}",
+                    )
+                )
                 await _notify(
                     f"Self-healing (attempt {heal_iterations})…", "running"
                 )
