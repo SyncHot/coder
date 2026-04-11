@@ -81,7 +81,30 @@ class OllamaBackend(InferenceBackend):
             kwargs["extra_body"] = {"num_ctx": self._num_ctx}
 
         t0 = time.perf_counter()
-        response = await self._client.chat.completions.create(**kwargs)
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except Exception as e:
+            # Ollama returns 500 when num_ctx is too large for available memory.
+            # Retry with progressively smaller context until it works.
+            if "500" in str(e) and self._num_ctx and self._num_ctx > 4096:
+                original_ctx = self._num_ctx
+                while self._num_ctx > 4096:
+                    self._num_ctx = max(4096, self._num_ctx // 2)
+                    kwargs["extra_body"] = {"num_ctx": self._num_ctx}
+                    logger.warning(
+                        "Ollama OOM with num_ctx=%d, retrying with %d",
+                        original_ctx, self._num_ctx,
+                    )
+                    try:
+                        response = await self._client.chat.completions.create(**kwargs)
+                        break
+                    except Exception:
+                        original_ctx = self._num_ctx
+                        continue
+                else:
+                    raise
+            else:
+                raise
         elapsed = time.perf_counter() - t0
 
         choice = response.choices[0]

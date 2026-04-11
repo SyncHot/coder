@@ -898,9 +898,17 @@ class ChatEngine:
         if self._model_selector and model:
             model_vram_mb = self._model_selector.estimate_vram_mb(model)
 
-        # Total usable memory = VRAM + (RAM - 4GB for OS)
-        total_mem_mb = vram_mb + max(0, ram_mb - 4_096)
-        free_for_kv_mb = max(0, total_mem_mb - model_vram_mb - 2_048)  # 2GB headroom
+        # Conservative memory calculation:
+        # Ollama loads model weights partly in VRAM, rest spills to RAM.
+        # KV cache also needs memory. Use only RAM as the shared pool
+        # (VRAM is mostly consumed by model weights for large models).
+        model_in_vram = min(vram_mb, model_vram_mb)
+        model_in_ram = max(0, model_vram_mb - model_in_vram)
+        free_ram_mb = max(0, ram_mb - model_in_ram - 6_144)  # 6GB for OS+overhead
+        free_vram_mb = max(0, vram_mb - model_in_vram)
+        free_for_kv_mb = free_ram_mb + free_vram_mb
+        # Apply 30% safety margin (Ollama metadata/overhead)
+        free_for_kv_mb = int(free_for_kv_mb * 0.7)
 
         # KV cache cost per token depends on model size (rough estimates)
         # hidden_dim × num_layers × 2(K+V) × 2(bytes) per token
