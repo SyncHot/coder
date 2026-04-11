@@ -235,12 +235,11 @@ class TestAlignIndentation:
         assert self._align(matched, new) == expected
 
     def test_first_line_correct_subsequent_missing(self):
-        """LLM indents first line but not subsequent lines."""
+        """LLM indents first line but not subsequent lines — fix subsequent."""
         matched = "            vtt = old_code"
         new = "            import re\nvtt = new_code"
-        # First line has 12 spaces, matched has 12 → delta = 0 → no change
-        # This is the tricky case — first line is correct but rest aren't
-        assert self._align(matched, new) == new  # delta is 0
+        expected = "            import re\n            vtt = new_code"
+        assert self._align(matched, new) == expected
 
     def test_preserves_relative_indentation(self):
         """Relative indentation within new_text is preserved."""
@@ -279,3 +278,27 @@ class TestAlignIndentation:
         matched = "x = old"
         new = "import re\nx = new"
         assert self._align(matched, new) == new
+
+    def test_qa_scenario_first_correct_rest_zero(self):
+        """Real QA scenario: first line has 12-space indent, rest at col 0."""
+        matched = "            vtt = \"WEBVTT\\n\\n\" + srt_content.replace(',', '.')"
+        new = (
+            "            import re\n"
+            "vtt_lines = srt_content.split('\\n')\n"
+            "vtt = [re.sub(r'pattern', fix, line) for line in vtt_lines]\n"
+            "vtt = \"WEBVTT\\n\\n\" + '\\n'.join(vtt)"
+        )
+        expected = (
+            "            import re\n"
+            "            vtt_lines = srt_content.split('\\n')\n"
+            "            vtt = [re.sub(r'pattern', fix, line) for line in vtt_lines]\n"
+            "            vtt = \"WEBVTT\\n\\n\" + '\\n'.join(vtt)"
+        )
+        assert self._align(matched, new) == expected
+
+    def test_subsequent_with_relative_indent(self):
+        """Subsequent lines have relative indentation that should be preserved."""
+        matched = "        x = old"
+        new = "        if cond:\n    x = 1\nelse:\n    x = 2"
+        expected = "        if cond:\n            x = 1\n        else:\n            x = 2"
+        assert self._align(matched, new) == expected

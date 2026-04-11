@@ -1100,9 +1100,13 @@ class PlanActVerifyAgent:
         """Ensure *new_text* has the same base indentation as *matched_text*.
 
         LLMs often indent the first replacement line correctly but leave
-        subsequent lines at column 0.  This computes the indentation delta
-        between the first line of *matched_text* and *new_text*, then
-        prepends it to every non-empty line.
+        subsequent lines at column 0.  Handles two cases:
+
+        Case A — all lines under-indented:
+            First line has less indent than target → add delta to ALL lines.
+        Case B — first line correct, rest wrong:
+            First line matches target but subsequent lines have less →
+            add delta to subsequent lines only.
         """
         import re as _re
 
@@ -1110,16 +1114,41 @@ class PlanActVerifyAgent:
             return new_text
 
         target_indent = _re.match(r"(\s*)", matched_text).group(1)
-        actual_indent = _re.match(r"(\s*)", new_text).group(1)
+        if not target_indent:
+            return new_text  # matched text has no indentation
 
-        if len(actual_indent) >= len(target_indent):
-            return new_text  # already has enough indentation
-
-        delta = target_indent[len(actual_indent):]
         lines = new_text.split("\n")
-        return "\n".join(
-            delta + line if line.strip() else line for line in lines
+        non_empty = [(i, line) for i, line in enumerate(lines) if line.strip()]
+        if len(non_empty) < 2:
+            return new_text  # single meaningful line — nothing to align
+
+        first_i, first_line = non_empty[0]
+        first_indent = _re.match(r"(\s*)", first_line).group(1)
+
+        if len(first_indent) < len(target_indent):
+            # Case A: first line also under-indented — fix all lines
+            delta = target_indent[len(first_indent):]
+            return "\n".join(
+                delta + line if line.strip() else line for line in lines
+            )
+
+        # First line has enough indent — check subsequent lines
+        subsequent = non_empty[1:]
+        min_sub_indent = min(
+            len(_re.match(r"(\s*)", line).group(1)) for _, line in subsequent
         )
+        if min_sub_indent >= len(target_indent):
+            return new_text  # all lines already have enough indentation
+
+        # Case B: add delta to subsequent lines only
+        delta = target_indent[:len(target_indent) - min_sub_indent]
+        result = []
+        for i, line in enumerate(lines):
+            if i == first_i or not line.strip():
+                result.append(line)
+            else:
+                result.append(delta + line)
+        return "\n".join(result)
 
     async def _replan_edit(
         self, file_content: str, old_text: str, new_text: str, file_rel: str,
