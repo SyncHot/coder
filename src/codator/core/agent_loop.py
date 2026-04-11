@@ -506,11 +506,10 @@ Rules:
 - **Use the project file tree provided in context to find correct file paths.**
   Never guess file paths — always refer to the actual files listed in the project context.
 - File paths must be relative to the project root.
-- For edit_file the description MUST be a JSON string:
-  {"file": "path", "old": "exact text to find", "new": "replacement text"}
-  IMPORTANT: The "old" field must be copied EXACTLY from the file you read —
-  including indentation, whitespace, and line endings. Do NOT paraphrase or
-  summarise the old text. Copy it character-for-character from the read_file output.
+- For edit_file: the description should explain WHAT to change in plain text.
+  Example: {"action":"edit_file","target":"app.py","description":"Add error handling to the connect function"}
+  You can OPTIONALLY provide JSON: {"file":"path","old":"exact text","new":"new text"}
+  But plain English is preferred — the system will generate the precise edit.
 - Keep plans minimal — only steps that are necessary.
 - Return ONLY valid JSON, no markdown fences.
 """
@@ -526,7 +525,7 @@ You MUST use this exact JSON schema:
   "reasoning": "<what went wrong and how to fix>",
   "steps": [
     {"action": "read_file", "target": "path/to/file.py", "description": "Read file before editing"},
-    {"action": "edit_file", "target": "path/to/file.py", "description": "{\"file\":\"path/to/file.py\",\"old\":\"old text\",\"new\":\"new text\"}"},
+    {"action": "edit_file", "target": "path/to/file.py", "description": "Fix the broken import by changing X to Y"},
     {"action": "run_command", "target": "chmod u+rw path/to/file.py", "description": "Fix permissions"},
     {"action": "grep", "target": "pattern", "description": "Search for code"},
     {"action": "analyze", "target": "path/to/file.py", "description": "Analyze code"}
@@ -537,6 +536,7 @@ CRITICAL RULES:
 - Each step MUST have "action", "target", and "description" fields.
 - Valid actions: read_file, edit_file, create_file, run_command, delete_file, analyze, grep, glob.
 - ALWAYS read_file before edit_file.
+- For edit_file: describe WHAT to change in plain text. The system will generate precise edits.
 - Return ONLY valid JSON, no markdown fences.
 """
 
@@ -602,19 +602,37 @@ Return JSON with the same schema as a planning response:
   "steps": [
     {"action": "grep", "target": "def my_function", "description": "Find function definition"},
     {"action": "read_file", "target": "path", "description": "Read file before editing"},
-    {"action": "edit_file", "target": "path", "description": "{\"file\":\"path\",\"old\":\"exact old text\",\"new\":\"new text\"}"}
+    {"action": "edit_file", "target": "path", "description": "Add caching to the HLS process startup"}
   ]
 }
 
 Rules:
 - ALWAYS read_file first before editing.
 - Use grep/glob to locate code when you are unsure of exact file paths or positions.
-- For edit_file the description MUST be a JSON string:
-  {"file": "path", "old": "exact text to find", "new": "replacement text"}
-  IMPORTANT: The "old" field must be copied EXACTLY from the file you read —
-  including indentation, whitespace, and line endings. Copy it character-for-character.
+- For edit_file: the description should explain WHAT to change (plain text is fine).
+  If you can, provide JSON: {"file":"path","old":"exact old text","new":"new text"}
+  But a plain English description is also acceptable — the system will generate the edit.
 - File paths must be relative to the project root.
 - Return ONLY valid JSON, no markdown fences.
+"""
+
+_GENERATE_EDIT_SYSTEM = """\
+You are a precise code editor. You will be given:
+1. The ACTUAL content of a source file.
+2. A description of the change to make.
+
+Your job: produce an edit as JSON:
+{"old": "<exact text from the file to replace>", "new": "<replacement text>"}
+
+RULES:
+- The "old" field MUST be copied character-for-character from the actual file
+  content — including indentation, whitespace, and blank lines.
+- Keep "old" as SHORT as possible — only the lines that need to change plus
+  1-2 lines of context above and below for uniqueness.
+- The "new" field is the replacement for the "old" text.
+- Return ONLY the JSON object, no markdown fences or explanation.
+- If the change is not applicable to this file, return:
+  {"old": "", "new": "", "error": "change not applicable"}
 """
 
 
@@ -1013,20 +1031,31 @@ class PlanActVerifyAgent:
 
     async def _act_edit_file(self, step: AgentStep) -> str:
         # Handle both JSON string and dict descriptions
+        edit_info = None
         if isinstance(step.description, dict):
             edit_info = step.description
         else:
             raw = step.description
+            # Try parsing as JSON (the old-style format with old/new fields)
             try:
-                edit_info = safe_parse_json(raw)
-            except (json.JSONDecodeError, ValueError):
-                # Last resort: strip control chars and retry
-                sanitised = re.sub(
-                    r'[\x00-\x1f]',
-                    lambda m: f'\\u{ord(m.group()):04x}',
-                    self._strip_json_fences(raw),
+                parsed = safe_parse_json(raw)
+                # Verify it actually has old/new fields — otherwise it's
+                # just a JSON blob that the model produced (like {"path":"..."})
+                if parsed.get("old") or parsed.get("old_text") or parsed.get("original"):
+                    edit_info = parsed
+            except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+                pass
+
+            if edit_info is None:
+                # Description is prose or malformed JSON — use LLM to
+                # generate the precise edit from the file content
+                logger.info(
+                    "edit_file step has prose description for %s — "
+                    "generating edit via LLM",
+                    step.target,
                 )
-                edit_info = json.loads(sanitised)
+                edit_info = await self._generate_edit(step.target, raw)
+
         file_rel = edit_info.get("file", step.target)
         old_text = edit_info.get("old") or edit_info.get("old_text") or edit_info.get("original") or ""
         new_text = edit_info.get("new") or edit_info.get("new_text") or edit_info.get("replacement") or ""
@@ -1236,6 +1265,52 @@ class PlanActVerifyAgent:
             else:
                 result.append(delta + line)
         return "\n".join(result)
+
+    async def _generate_edit(
+        self, file_rel: str, change_description: str,
+    ) -> dict:
+        """Generate a precise {old, new} edit from a prose description.
+
+        This is the key innovation: the plan step only needs to describe
+        WHAT to change in plain English. This method reads the file and
+        asks the LLM to produce the exact old/new text.
+        """
+        path = self._safe_path(file_rel)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        file_content = path.read_text(encoding="utf-8")
+        # Truncate very large files to stay within context
+        max_chars = self._num_ctx * 3
+        truncated = file_content[:max_chars]
+
+        user_msg = (
+            f"FILE: {file_rel}\n"
+            f"```\n{truncated}\n```\n\n"
+            f"CHANGE REQUESTED:\n{change_description}\n\n"
+            f"Produce the edit as JSON: "
+            f'{{\"old\": \"exact text from file\", \"new\": \"replacement text\"}}'
+        )
+
+        logger.info("Generating edit for %s via LLM", file_rel)
+        raw = await self._ollama_chat(
+            _GENERATE_EDIT_SYSTEM, user_msg, use_architect=True,
+        )
+        edit = safe_parse_json(raw)
+
+        error = edit.get("error", "")
+        if error:
+            raise ValueError(
+                f"LLM could not generate edit for {file_rel}: {error}"
+            )
+
+        old_text = edit.get("old", "")
+        if not old_text:
+            raise ValueError(
+                f"LLM generated empty 'old' field for {file_rel}"
+            )
+
+        return edit
 
     async def _replan_edit(
         self, file_content: str, old_text: str, new_text: str, file_rel: str,
