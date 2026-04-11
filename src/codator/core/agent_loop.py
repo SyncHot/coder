@@ -574,6 +574,8 @@ Protocol:
 2. PIVOT: If the same file/approach failed twice → CHANGE STRATEGY ENTIRELY.
    Different function, different file, alternative algorithm.
 3. EXECUTE: read_file FIRST (always), then edit_file with correct content.
+4. SCOPE: Fix ONLY errors your edits introduced. Do NOT fix pre-existing lint
+   warnings or unused imports that existed before your changes.
 
 Anti-patterns (INSTANT FAILURE if you do these):
 - Repeating an edit that returned "text not found" → FORBIDDEN.
@@ -581,6 +583,7 @@ Anti-patterns (INSTANT FAILURE if you do these):
 - Producing the same plan as a previous failed attempt → FORBIDDEN.
 - Installing a package that doesn't exist (use stdlib alternatives) → FORBIDDEN.
 - Generating non-JSON output → FORBIDDEN.
+- Fixing lint errors you did not introduce (F401 unused import etc.) → FORBIDDEN.
 
 Valid actions: read_file, edit_file, create_file, run_command, delete_file, analyze, grep, glob.
 Each step MUST have "action", "target", "description" fields.
@@ -725,6 +728,10 @@ class PlanActVerifyAgent:
 
         # Rolling scratchpad — compact log of what agent did for LLM context
         self._scratchpad = StepScratchpad(max_entries=20)
+
+        # Lint baseline — captures pre-existing lint errors before agent edits
+        # so verify() only reports NEW errors introduced by the agent.
+        self._lint_baseline: set[str] = set()
 
     @property
     def architect_model(self) -> str | None:
@@ -1671,10 +1678,38 @@ class PlanActVerifyAgent:
         success = len(code_errors) == 0
         return VerifyResult(success=success, errors=code_errors, warnings=warnings)
 
+    async def _capture_lint_baseline(self, files: list[str]) -> None:
+        """Capture pre-existing lint errors for target files BEFORE editing.
+
+        Stored in _lint_baseline so verify() can subtract them. This prevents
+        the agent from being blamed for errors it didn't introduce.
+        """
+        py_files = [f for f in files if f.endswith(".py")]
+        if not py_files:
+            return
+        targets = " ".join(py_files)
+        result = await self._run_quiet(f"ruff check {targets}")
+        if result and "not found" not in result and "No such file" not in result:
+            for line in result.splitlines():
+                stripped = line.strip()
+                if stripped and not any(
+                    stripped.startswith(p) for p in ("Found", "All checks", "[")
+                ):
+                    self._lint_baseline.add(stripped)
+            if self._lint_baseline:
+                logger.info(
+                    "Lint baseline: %d pre-existing issues captured",
+                    len(self._lint_baseline),
+                )
+
     async def _verify_python_lint(
         self, changed_files: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
-        """Tier 2: ruff check — targeted to changed files when possible."""
+        """Tier 2: ruff check — targeted to changed files when possible.
+
+        Subtracts pre-existing errors captured in _lint_baseline so the agent
+        is only held responsible for errors it introduced.
+        """
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -1701,6 +1736,9 @@ class PlanActVerifyAgent:
                         stripped.startswith(p)
                         for p in ("Found", "All checks", "[")
                     ):
+                        continue
+                    # Skip pre-existing lint errors (captured before edits)
+                    if stripped in self._lint_baseline:
                         continue
                     if ": W" in stripped or ": D" in stripped:
                         warnings.append(stripped)
@@ -2320,6 +2358,16 @@ class PlanActVerifyAgent:
             s.action in _mutating_actions for s in current_plan.steps
         )
 
+        # ---- Lint baseline (capture pre-existing errors before any edits) ---
+        if not is_analysis_only:
+            edit_targets = list({
+                s.target for s in current_plan.steps
+                if s.action in ("edit_file", "create_file") and s.target
+            })
+            if edit_targets:
+                self._lint_baseline.clear()
+                await self._capture_lint_baseline(edit_targets)
+
         for iteration in range(1 + self._max_heal):
             # ---- Act -------------------------------------------------------
             changed_files: list[str] = []
@@ -2411,17 +2459,28 @@ class PlanActVerifyAgent:
 
             # ---- No-progress detection ------------------------------------
             current_error_count = len(verification.errors)
-            if prev_error_count is not None and current_error_count >= prev_error_count:
+            # Abort if errors not decreasing OR if errors exploded (3x+ growth)
+            regression = (
+                prev_error_count is not None
+                and current_error_count >= prev_error_count
+            )
+            explosion = (
+                prev_error_count is not None
+                and prev_error_count > 0
+                and current_error_count >= prev_error_count * 3
+            )
+            if regression or explosion:
+                reason = "explosion" if explosion else "no progress"
                 status = self._scratchpad.status_report(
-                    changed_files, verification.errors, "ABORTED — no progress"
+                    changed_files, verification.errors,
+                    f"ABORTED — {reason}",
                 )
                 logger.warning(
-                    "No progress: error count %d → %d (not decreasing). "
-                    "Aborting heal loop. %s",
-                    prev_error_count, current_error_count, status,
+                    "No progress in implement_proposals: errors %d → %d (%s). %s",
+                    prev_error_count or 0, current_error_count, reason, status,
                 )
                 await _notify(
-                    f"No progress after heal (errors: {current_error_count}). Stopping.",
+                    f"No progress ({reason}, errors: {current_error_count}). Stopping.",
                     "failed",
                 )
                 break
