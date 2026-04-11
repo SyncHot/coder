@@ -1314,14 +1314,17 @@ class PlanActVerifyAgent:
     def _align_indentation(matched_text: str, new_text: str) -> str:
         """Ensure *new_text* has the same base indentation as *matched_text*.
 
-        LLMs often indent the first replacement line correctly but leave
-        subsequent lines at column 0.  Handles two cases:
+        LLMs often produce replacement code with wrong base indentation.
+        Handles three cases:
 
         Case A — all lines under-indented:
             First line has less indent than target → add delta to ALL lines.
         Case B — first line correct, rest wrong:
             First line matches target but subsequent lines have less →
             add delta to subsequent lines only.
+        Case C — all lines over-indented:
+            First line has more indent than target → shift ALL lines left
+            by the excess, preserving relative structure.
         """
 
         if "\n" not in new_text:
@@ -1346,7 +1349,20 @@ class PlanActVerifyAgent:
                 delta + line if line.strip() else line for line in lines
             )
 
-        # First line has enough indent — check subsequent lines
+        if len(first_indent) > len(target_indent):
+            # Case C: first line over-indented — shift all lines left
+            excess = len(first_indent) - len(target_indent)
+            result = []
+            for line in lines:
+                if not line.strip():
+                    result.append(line)
+                else:
+                    cur = len(re.match(r"(\s*)", line).group(1))
+                    new_indent = max(0, cur - excess)
+                    result.append(" " * new_indent + line.lstrip())
+            return "\n".join(result)
+
+        # First line has correct indent — check subsequent lines
         subsequent = non_empty[1:]
         min_sub_indent = min(
             len(re.match(r"(\s*)", line).group(1)) for _, line in subsequent
