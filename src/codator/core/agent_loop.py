@@ -1742,11 +1742,27 @@ class PlanActVerifyAgent:
             return system_ruff
         return None
 
+    @staticmethod
+    def _normalize_lint_entry(line: str) -> str | None:
+        """Extract line-number-independent key from a concise ruff output line.
+
+        Concise format: ``path:line:col: RULE message``
+        Normalized:     ``path: RULE message``
+
+        This ensures that pre-existing errors still match after edits shift
+        line numbers.  Returns *None* for non-error lines (summaries, blanks).
+        """
+        m = re.match(r"^(.+?):\d+:\d+:\s+(.+)$", line)
+        if m:
+            return f"{m.group(1)}: {m.group(2)}"
+        return None
+
     async def _capture_lint_baseline(self, files: list[str]) -> None:
         """Capture pre-existing lint errors for target files BEFORE editing.
 
         Stored in _lint_baseline so verify() can subtract them. This prevents
         the agent from being blamed for errors it didn't introduce.
+        Uses --output-format=concise for stable, single-line-per-error output.
         """
         py_files = [f for f in files if f.endswith(".py")]
         if not py_files:
@@ -1755,14 +1771,14 @@ class PlanActVerifyAgent:
         if not ruff:
             return
         targets = " ".join(py_files)
-        result = await self._run_quiet(f"{ruff} check {targets}")
+        result = await self._run_quiet(
+            f"{ruff} check --output-format=concise {targets}"
+        )
         if result and "not found" not in result and "No such file" not in result:
             for line in result.splitlines():
-                stripped = line.strip()
-                if stripped and not any(
-                    stripped.startswith(p) for p in ("Found", "All checks", "[")
-                ):
-                    self._lint_baseline.add(stripped)
+                normalized = self._normalize_lint_entry(line.strip())
+                if normalized:
+                    self._lint_baseline.add(normalized)
             if self._lint_baseline:
                 logger.info(
                     "Lint baseline: %d pre-existing issues captured",
@@ -1776,6 +1792,8 @@ class PlanActVerifyAgent:
 
         Subtracts pre-existing errors captured in _lint_baseline so the agent
         is only held responsible for errors it introduced.
+        Uses --output-format=concise for stable, single-line-per-error output
+        and line-number-independent baseline matching.
         """
         errors: list[str] = []
         warnings: list[str] = []
@@ -1791,9 +1809,9 @@ class PlanActVerifyAgent:
             if not py_files:
                 return errors, warnings
             targets = " ".join(py_files)
-            cmd = f"{ruff} check {targets}"
+            cmd = f"{ruff} check --output-format=concise {targets}"
         else:
-            cmd = f"{ruff} check ."
+            cmd = f"{ruff} check --output-format=concise ."
 
         ruff_result = await self._run_quiet(cmd)
         if ruff_result is not None:
@@ -1804,13 +1822,12 @@ class PlanActVerifyAgent:
                     stripped = line.strip()
                     if not stripped:
                         continue
-                    if any(
-                        stripped.startswith(p)
-                        for p in ("Found", "All checks", "[")
-                    ):
+                    # Normalize to strip line:col for baseline comparison
+                    normalized = self._normalize_lint_entry(stripped)
+                    if not normalized:
                         continue
                     # Skip pre-existing lint errors (captured before edits)
-                    if stripped in self._lint_baseline:
+                    if normalized in self._lint_baseline:
                         continue
                     if ": W" in stripped or ": D" in stripped:
                         warnings.append(stripped)
@@ -1829,7 +1846,7 @@ class PlanActVerifyAgent:
             return errors, warnings
 
         pytest_result = await self._run_quiet(
-            "python -m pytest --tb=short -q"
+            f"{sys.executable} -m pytest --tb=short -q"
         )
         if pytest_result is not None and "not found" not in pytest_result:
             for line in pytest_result.splitlines():
@@ -1853,7 +1870,7 @@ class PlanActVerifyAgent:
             if not full.exists():
                 continue
             result = await self._run_quiet(
-                f"python -m py_compile {full}"
+                f"{sys.executable} -m py_compile {full}"
             )
             if result and ("SyntaxError" in result or "Error" in result):
                 syntax_errors.append(f"Syntax error in {rel_path}: {result.strip()}")
