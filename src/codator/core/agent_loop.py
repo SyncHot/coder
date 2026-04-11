@@ -1072,7 +1072,8 @@ class PlanActVerifyAgent:
         """Find the best approximate match of *needle* inside *content*.
 
         Returns (start, end) character indices in *content* or None.
-        Uses character-level similarity on sliding windows of lines.
+        Uses progressive thresholds: 70% → 55% → 40% with relative
+        indentation normalization for better matching across indent levels.
         """
         import difflib
 
@@ -1084,40 +1085,69 @@ class PlanActVerifyAgent:
         if not content_lines:
             return None
 
-        # Normalised needle text for comparison (stripped lines joined)
-        needle_norm = "\n".join(l.strip() for l in needle_lines)
         n = len(needle_lines)
+
+        def _normalize(lines: list[str]) -> str:
+            """Normalize with relative indentation (aider-style)."""
+            return "\n".join(l.strip() for l in lines)
+
+        def _normalize_relative(lines: list[str]) -> str:
+            """Normalize preserving relative indent structure."""
+            if not lines:
+                return ""
+            stripped = [l.rstrip() for l in lines]
+            # Find minimum indentation
+            indents = [len(l) - len(l.lstrip()) for l in stripped if l.strip()]
+            base = min(indents) if indents else 0
+            return "\n".join(l[base:].rstrip() for l in stripped)
+
+        # Try matching with multiple normalization strategies
+        needle_norms = [
+            _normalize(needle_lines),
+            _normalize_relative(needle_lines),
+        ]
 
         best_ratio = 0.0
         best_span: tuple[int, int] | None = None
 
-        # Try windows of n-2 .. n+2 lines to handle off-by-a-few
-        for delta in range(-2, 3):
+        # Try windows of n-2 .. n+3 lines to handle off-by-a-few
+        for delta in range(-2, 4):
             m = n + delta
             if m < 1 or m > len(content_lines):
                 continue
             for i in range(len(content_lines) - m + 1):
-                window_norm = "\n".join(
-                    l.strip() for l in content_lines[i:i + m]
-                )
-                sm = difflib.SequenceMatcher(
-                    None, needle_norm, window_norm, autojunk=False
-                )
-                ratio = sm.ratio()
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best_span = (i, i + m)
+                window_lines = content_lines[i:i + m]
+                window_norms = [
+                    _normalize(window_lines),
+                    _normalize_relative(window_lines),
+                ]
+                # Try all normalization combinations
+                for nn in needle_norms:
+                    for wn in window_norms:
+                        sm = difflib.SequenceMatcher(
+                            None, nn, wn, autojunk=False
+                        )
+                        ratio = sm.ratio()
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_span = (i, i + m)
 
-        # Require at least 70% character-level similarity
-        if best_ratio < 0.70 or best_span is None:
+        # Progressive thresholds: try strict first, relax if needed
+        # 70% = high confidence, 55% = moderate (e.g. variable renames),
+        # 40% = structural match (same shape, different names)
+        threshold = 0.70 if best_ratio >= 0.70 else (
+            0.55 if best_ratio >= 0.55 else 0.40
+        )
+
+        if best_ratio < threshold or best_span is None:
             return None
 
         start_line, end_line = best_span
         start_pos = sum(len(l) for l in content_lines[:start_line])
         end_pos = sum(len(l) for l in content_lines[:end_line])
         logger.info(
-            "Fuzzy match: ratio=%.2f, lines %d-%d in file",
-            best_ratio, start_line, end_line,
+            "Fuzzy match: ratio=%.2f (threshold=%.2f), lines %d-%d in file",
+            best_ratio, threshold, start_line, end_line,
         )
         return start_pos, end_pos
 
@@ -1503,8 +1533,13 @@ class PlanActVerifyAgent:
         original_task: str,
         project_context: str = "",
         on_token: Callable[[str], Any] | None = None,
+        previous_attempts: list[str] | None = None,
     ) -> AgentPlan:
-        """Ask the model to produce a fix plan for *errors*."""
+        """Ask the model to produce a fix plan for *errors*.
+
+        Includes history of previous failed attempts to avoid repeating
+        the same fixes.
+        """
         user_msg = (
             f"Original task:\n{original_task}\n\n"
             f"Errors:\n" + "\n".join(errors)
@@ -1512,7 +1547,15 @@ class PlanActVerifyAgent:
         if project_context:
             user_msg += f"\n\nProject context:\n{project_context}"
 
-        logger.info("Self-healing: %d errors to fix", len(errors))
+        if previous_attempts:
+            user_msg += (
+                "\n\n⚠️ PREVIOUS FAILED ATTEMPTS (do NOT repeat these):\n"
+                + "\n---\n".join(previous_attempts)
+                + "\n\nYou MUST try a DIFFERENT approach this time."
+            )
+
+        logger.info("Self-healing: %d errors to fix (prev attempts: %d)",
+                    len(errors), len(previous_attempts or []))
         raw = await self._ollama_chat(_HEAL_SYSTEM, user_msg, on_token=on_token)
         return self._parse_plan(raw, f"fix: {original_task}")
 
@@ -1742,9 +1785,18 @@ class PlanActVerifyAgent:
                     await _notify(
                         f"Self-healing (attempt {heal_iterations})…", "running"
                     )
+                    prev_attempts = []
+                    if heal_iterations > 1:
+                        for a in all_actions:
+                            if not a.success:
+                                prev_attempts.append(
+                                    f"Attempt: {a.step.description}\n"
+                                    f"Error: {a.error or 'unknown'}"
+                                )
                     try:
                         current_plan = await self.self_heal(
                             verification.errors, impl_task, project_context,
+                            previous_attempts=prev_attempts or None,
                         )
                         await _notify(
                             f"Heal plan — {len(current_plan.steps)} steps", "done"
@@ -1941,9 +1993,20 @@ class PlanActVerifyAgent:
                 await _notify(
                     f"Self-healing (attempt {heal_iterations})…", "running"
                 )
+                # Build history of previous attempts for context
+                prev_attempts = []
+                if heal_iterations > 1:
+                    # Summarize what was tried in previous iterations
+                    for a in all_actions:
+                        if not a.success:
+                            prev_attempts.append(
+                                f"Attempt: {a.step.description}\n"
+                                f"Error: {a.error or 'unknown'}"
+                            )
                 try:
                     current_plan = await self.self_heal(
                         verification.errors, task, project_context,
+                        previous_attempts=prev_attempts or None,
                     )
                     await _notify(
                         f"Heal plan ready — {len(current_plan.steps)} steps", "done"

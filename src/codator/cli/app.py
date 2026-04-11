@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
+from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
@@ -27,6 +29,8 @@ from codator.infrastructure.hardware import check_hardware
 
 logger = logging.getLogger("codator")
 
+_SESSION_FILE = Path.home() / ".codator" / "session.json"
+
 # Slash-command auto-completion
 COMMANDS = [
     "/help", "/quit", "/exit", "/model", "/api", "/context",
@@ -37,6 +41,25 @@ COMMANDS = [
     "/fetch", "/search",
 ]
 command_completer = WordCompleter(COMMANDS, sentence=True)
+
+
+def _load_session() -> dict:
+    """Load persisted session state (mode, model)."""
+    try:
+        if _SESSION_FILE.exists():
+            return json.loads(_SESSION_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_session(mode: str, model: str) -> None:
+    """Persist session state for next startup."""
+    try:
+        _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SESSION_FILE.write_text(json.dumps({"mode": mode, "model": model}))
+    except Exception:
+        pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -134,6 +157,24 @@ async def async_main():
     _elapsed = _time.monotonic() - _t0
     if _elapsed > 2.0:
         print_info(f"Ready in {_elapsed:.1f}s")
+
+    # Restore session state (mode + model from last session)
+    saved = _load_session()
+    if saved.get("mode") in ("agent", "chat"):
+        engine.set_mode(saved["mode"])
+        if saved["mode"] == "agent":
+            print_info("🤖 Restored **agent mode** from last session.")
+    if saved.get("model") and not args.model:
+        # Only restore model if user didn't explicitly specify one
+        restored_model = saved["model"]
+        if restored_model != engine.active_model:
+            try:
+                num_ctx = await engine._resolve_num_ctx(restored_model)
+                engine._backend.switch_model(restored_model, num_ctx=num_ctx)
+                engine._active_model = restored_model
+                print_info(f"Restored model: {restored_model} (ctx: {num_ctx:,})")
+            except Exception as exc:
+                logger.warning("Could not restore model %s: %s", restored_model, exc)
 
     print_welcome(engine.active_model, hw_summary)
 
@@ -233,6 +274,7 @@ async def async_main():
             # Slash commands
             if user_input.startswith("/"):
                 should_exit = await handle_command(user_input, engine)
+                _save_session(engine.mode, engine.active_model)
                 if should_exit:
                     break
                 continue
