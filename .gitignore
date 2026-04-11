@@ -12,3 +12,4 @@ build/
 .pytest_cache/
 *.gguf
 .env
+config/local.toml

@@ -172,7 +172,13 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def load_config(path: Path | None = None) -> AppSettings:
-    """Load configuration from TOML file, with env-var overrides for API keys."""
+    """Load configuration from TOML file, with local overrides and env vars.
+
+    Load order (each layer merges on top of previous):
+    1. default.toml (or explicit path)
+    2. config/local.toml (gitignored, for machine-specific secrets)
+    3. Environment variables (ETHOS_URL, ETHOS_USERNAME, etc.)
+    """
     raw: dict[str, Any] = {}
 
     if path and path.exists():
@@ -185,6 +191,19 @@ def load_config(path: Path | None = None) -> AppSettings:
 
     # Strip top-level [app] section (metadata only)
     raw.pop("app", None)
+
+    # Merge config/local.toml if present (machine-specific secrets)
+    local_candidates = [
+        Path("config/local.toml"),
+        Path(__file__).resolve().parent.parent.parent / "config" / "local.toml",
+        Path.home() / ".config" / "codator" / "local.toml",
+    ]
+    for local_path in local_candidates:
+        if local_path.exists():
+            local_raw = tomllib.loads(local_path.read_text(encoding="utf-8"))
+            local_raw.pop("app", None)
+            raw = _deep_merge(raw, local_raw)
+            break
 
     settings = AppSettings(**raw)
 
