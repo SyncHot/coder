@@ -175,6 +175,40 @@ never dump raw tracebacks. Say what went wrong and suggest a fix.
 {git_context}
 """
 
+TEXT_TOOL_INSTRUCTIONS = """\
+## Text-Based Tool Calling (CRITICAL)
+
+Your model does NOT support native function calling. To use tools, you MUST \
+output a JSON object in your response with this exact format:
+
+```
+{{"name": "tool_name", "arguments": {{"param1": "value1", "param2": "value2"}}}}
+```
+
+### Rules:
+1. **ALWAYS use tools to read code before answering.** Never guess file contents.
+2. Output the JSON tool call on its own line. You may include brief text before it.
+3. After receiving tool results, analyze them and either call another tool or \
+give your final answer.
+4. You can call multiple tools by outputting multiple JSON objects.
+
+### Example workflow:
+User: "analyze video_station.py"
+You: Let me read the file first.
+{{"name": "read_file", "arguments": {{"path": "backend/blueprints/video_station.py"}}}}
+
+### Available tools:
+{tool_list}
+
+### Most used tools:
+- `read_file`: {{"name": "read_file", "arguments": {{"path": "path/to/file"}}}}
+- `grep`: {{"name": "grep", "arguments": {{"pattern": "search_term", "path": "."}}}}
+- `list_directory`: {{"name": "list_directory", "arguments": {{"path": "."}}}}
+- `terminal`: {{"name": "terminal", "arguments": {{"command": "cmd"}}}}
+
+**IMPORTANT**: Do NOT write essays about what you THINK the code does. \
+READ it first with tools, then give concrete analysis based on actual code."""
+
 
 class ChatEngine:
     """Main orchestrator for the coding assistant."""
@@ -453,10 +487,22 @@ class ChatEngine:
 
         tools_ctx = self._tools.tool_prompt_section()
 
-        return SYSTEM_PROMPT.format(
+        prompt = SYSTEM_PROMPT.format(
             project_context=project_ctx,
             git_context=git_ctx,
-        ) + ("\n\n" + tools_ctx if tools_ctx else "")
+        )
+
+        # For models without native tool support, inject explicit text-based
+        # tool calling instructions so they emit parseable JSON.
+        if isinstance(self._backend, OllamaBackend) and not self._backend.supports_tools:
+            prompt += "\n\n" + TEXT_TOOL_INSTRUCTIONS.format(
+                tool_list=self._tools.tool_names_with_descriptions()
+            )
+
+        if tools_ctx:
+            prompt += "\n\n" + tools_ctx
+
+        return prompt
 
     def _supports_tool_calling(self) -> bool:
         """Check if the current backend supports native function calling."""
@@ -595,6 +641,7 @@ class ChatEngine:
         tools_defs = self._tools.to_openai_tools()
         seen_calls: set[str] = set()
         nudge_count = 0  # consecutive nudges without progress
+        _tool_fallback_prompted = False
 
         for _iteration in range(MAX_TOOL_ITERATIONS):
             # Non-streaming call with tool support
@@ -604,6 +651,20 @@ class ChatEngine:
                 temperature=self._settings.inference.temperature,
                 tools=tools_defs,
             )
+
+            # If backend just discovered model doesn't support tools,
+            # inject text-based tool instructions and retry this iteration.
+            if (
+                isinstance(self._backend, OllamaBackend)
+                and not self._backend.supports_tools
+                and not _tool_fallback_prompted
+            ):
+                _tool_fallback_prompted = True
+                self._refresh_system_prompt()
+                tools_defs = []  # stop passing native tools
+                # First response may be empty or generic — retry with new prompt
+                if not result.text or len(result.text.strip()) < 20:
+                    continue
 
             # Check for native tool calls first, then text-based fallback
             tool_calls = result.tool_calls

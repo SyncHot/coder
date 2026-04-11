@@ -70,6 +70,12 @@ class ToolRegistry:
         )
         return "\n".join(lines)
 
+    def tool_names_with_descriptions(self) -> str:
+        """Return compact tool list for text-based tool calling instructions."""
+        return "\n".join(
+            f"- `{t.name}`: {t.description}" for t in self._tools.values()
+        )
+
     def to_openai_tools(self) -> list[dict]:
         """Return tool definitions in OpenAI function-calling format."""
         tools = []
