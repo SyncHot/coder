@@ -632,6 +632,8 @@ RULES:
 - The "old" field MUST be copied character-for-character from the actual file
   content — including indentation, whitespace, and blank lines.
 - The "new" field should achieve the same intent as the original replacement.
+- For INSERTIONS: "old" must contain the existing lines around the insertion
+  point, and "new" must contain those same lines with the new code inserted.
 - Return ONLY the JSON object, no markdown fences or explanation.
 - If the intended edit does not correspond to any part of the file, return:
   {"old": "", "new": "", "error": "no matching code found"}
@@ -645,32 +647,44 @@ Return JSON:
   "task": "<implementation summary>",
   "reasoning": "<approach — what you'll change and why>",
   "steps": [
-    {"action": "grep", "target": "def my_function", "description": "Locate function"},
-    {"action": "read_file", "target": "path", "description": "Read before editing"},
-    {"action": "edit_file", "target": "path", "description": "What to change"}
+    {"action": "read_file", "target": "path", "description": "Read file before editing"},
+    {"action": "edit_file", "target": "path", "description": "Detailed description: what to add/change and WHERE (which function, after which line/statement)"}
   ]
 }
 
 Rules:
 - read_file BEFORE edit_file. Always.
 - Use grep/glob when unsure of exact paths or positions.
-- edit_file description: plain English or JSON {"file":"path","old":"exact","new":"replacement"}.
+- edit_file description MUST be specific: name the function, the exact location (e.g. "after the ffprobe check"), and what code to add/modify.
+- For insertions: describe WHAT to insert and WHERE (between which existing lines).
 - Paths relative to project root.
 - Return ONLY valid JSON. No fences.
 """
 
 _GENERATE_EDIT_SYSTEM = """\
-Precise code editor. Given file content + change description, return ONE edit.
+Precise code editor. Given file content (with line numbers) + change description, return ONE edit as JSON.
 
-Output JSON:
-{"old": "<exact text from file to replace>", "new": "<replacement>"}
+Output format:
+{"old": "<exact text copied from the file>", "new": "<replacement text>"}
 
-Rules:
-- "old" MUST be character-for-character from the file. Whitespace, indentation, blank lines — exact.
-- "old" must be MINIMAL — only lines that change + 1-2 context lines for uniqueness.
-- "new" achieves the described change.
-- If not applicable: {"old": "", "new": "", "error": "change not applicable"}
-- ONLY JSON. No fences. No explanation.
+CRITICAL RULES:
+1. "old" MUST be copied CHARACTER-FOR-CHARACTER from the file — whitespace, indentation, blank lines must be exact.
+2. "old" should include 2-3 context lines around the change point for unique matching.
+3. "new" contains the same context lines with the change applied.
+4. Do NOT include line numbers in "old" or "new" — they are only for reference.
+
+FOR INSERTIONS (adding new code):
+- Copy the surrounding lines (before and after the insertion point) into "old".
+- In "new", include those SAME surrounding lines with the new code inserted between them.
+- Example — to add 'mediainfo' after the 'ffprobe' line:
+  {"old": "        'ffprobe': shutil.which('ffprobe') is not None,\\n    }", "new": "        'ffprobe': shutil.which('ffprobe') is not None,\\n        'mediainfo': shutil.which('mediainfo') is not None,\\n    }"}
+
+FOR MODIFICATIONS (changing existing code):
+- Copy the lines that need changing into "old".
+- Put the modified version in "new".
+
+If the change is not applicable: {"old": "", "new": "", "error": "reason"}
+ONLY JSON. No markdown fences. No explanation.
 """
 
 
@@ -1373,6 +1387,12 @@ class PlanActVerifyAgent:
         is_truncated = len(file_content) > max_chars
         shown_lines = truncated.count("\n") + 1
 
+        # Add line numbers for LLM reference (NOT to be included in old/new)
+        numbered_lines = []
+        for i, line in enumerate(truncated.splitlines(keepends=True), 1):
+            numbered_lines.append(f"{i:4d} | {line}")
+        numbered_content = "".join(numbered_lines)
+
         # Build prompt with file content and truncation warning
         parts = [f"FILE: {file_rel} ({total_lines} lines)"]
         if is_truncated:
@@ -1381,7 +1401,12 @@ class PlanActVerifyAgent:
                 f"If the code to change is not visible, return: "
                 f'{{"old": "", "new": "", "error": "code beyond visible range"}}'
             )
-        parts.append(f"```\n{truncated}\n```")
+        parts.append(
+            "Below is the file with line numbers for reference. "
+            "Do NOT include line numbers (e.g. '  42 | ') in your old/new text — "
+            "copy only the actual code."
+        )
+        parts.append(f"```\n{numbered_content}\n```")
 
         # Include scratchpad so LLM knows what steps already executed
         scratchpad_ctx = self._scratchpad.to_context(last_n=5)
@@ -1410,9 +1435,29 @@ class PlanActVerifyAgent:
 
         old_text = edit.get("old", "")
         if not old_text:
-            raise ValueError(
-                f"LLM generated empty 'old' field for {file_rel}"
+            # Retry once with explicit insertion guidance
+            logger.warning(
+                "Empty 'old' from LLM for %s — retrying with insertion hint",
+                file_rel,
             )
+            retry_msg = (
+                f"{user_msg}\n\n"
+                "⚠️ PREVIOUS ATTEMPT RETURNED EMPTY 'old'. This is wrong.\n"
+                "For INSERTIONS: copy the lines AROUND the insertion point into 'old', "
+                "then put those same lines WITH the new code inserted between them "
+                "into 'new'. You MUST return a non-empty 'old' field.\n"
+                "For MODIFICATIONS: copy the existing lines that need changing.\n"
+                "Return the JSON now."
+            )
+            raw = await self._ollama_chat(
+                _GENERATE_EDIT_SYSTEM, retry_msg, use_architect=True,
+            )
+            edit = safe_parse_json(raw)
+            old_text = edit.get("old", "")
+            if not old_text:
+                raise ValueError(
+                    f"LLM generated empty 'old' field for {file_rel} (after retry)"
+                )
 
         return edit
 
