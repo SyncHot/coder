@@ -128,3 +128,15 @@ gitea_token = ""
 github_token = ""
 default_repo = ""
 default_labels = ["bug", "qa-automated"]
+
+[qa]
+# Ethos OS NAS QA testing
+# Credentials: prefer ETHOS_URL, ETHOS_USERNAME, ETHOS_PASSWORD env vars
+ethos_url = ""
+ethos_username = ""
+ethos_password = ""
+verify_ssl = false
+project_name = "Ethos"
+auto_create_tickets = true
+slow_threshold = 5.0
+skip_suites = []

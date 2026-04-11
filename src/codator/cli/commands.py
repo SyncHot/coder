@@ -134,6 +134,9 @@ async def handle_command(cmd: str, engine: ChatEngine) -> bool:
         case "/log":
             await _handle_log(arg)
 
+        case "/qa":
+            await _handle_qa(arg, engine)
+
         case _:
             print_error(f"Unknown command: {command}. Type /help for available commands.")
 
@@ -1127,3 +1130,129 @@ async def _handle_search(arg: str, engine: ChatEngine) -> None:
         ToolCall(tool_name="web_search", parameters={"query": arg.strip()})
     )
     print_tool_result(result)
+
+
+# ---------------------------------------------------------------------------
+# QA Runner
+# ---------------------------------------------------------------------------
+
+
+async def _handle_qa(arg: str, engine: ChatEngine) -> None:
+    """Handle /qa — comprehensive QA testing for Ethos OS NAS.
+
+    Usage:
+        /qa              — run full QA suite on configured NAS
+        /qa status       — show QA config status
+        /qa <url>        — run QA against specific URL
+        /qa report       — show last QA report
+    """
+    from codator.config import get_settings
+    from codator.core.qa_runner import QARunner
+    from codator.infrastructure.tools.ethos_ticket_tool import EthosClient
+
+    cfg = get_settings()
+    subcommand = arg.strip().lower()
+
+    if subcommand == "status":
+        url = cfg.qa.ethos_url
+        user = cfg.qa.ethos_username
+        has_pw = bool(cfg.qa.ethos_password)
+        project = cfg.qa.project_name
+        print_info(
+            f"🔧 QA Config:\n"
+            f"  URL: {url or '(not set — use ETHOS_URL env var)'}\n"
+            f"  User: {user or '(not set — use ETHOS_USERNAME env var)'}\n"
+            f"  Password: {'✓ set' if has_pw else '✗ not set (use ETHOS_PASSWORD env var)'}\n"
+            f"  Project: {project}\n"
+            f"  Auto-create tickets: {cfg.qa.auto_create_tickets}\n"
+            f"  Skip suites: {cfg.qa.skip_suites or '(none)'}"
+        )
+        return
+
+    if subcommand == "report":
+        last = getattr(engine, '_last_qa_report', None)
+        if last:
+            console.print(last.summary)
+        else:
+            print_info("No QA report available. Run /qa first.")
+        return
+
+    # Determine target URL
+    ethos_url = cfg.qa.ethos_url
+    ethos_user = cfg.qa.ethos_username
+    ethos_pw = cfg.qa.ethos_password
+
+    if subcommand and subcommand not in ("status", "report"):
+        ethos_url = arg.strip()
+
+    if not ethos_url:
+        print_error(
+            "No Ethos NAS URL configured.\n"
+            "  Set ETHOS_URL env var or add ethos_url to [qa] in config.\n"
+            "  Or: /qa https://nas.myserver.pl"
+        )
+        return
+
+    if not ethos_user or not ethos_pw:
+        print_error(
+            "Ethos credentials not set.\n"
+            "  Set ETHOS_USERNAME and ETHOS_PASSWORD env vars."
+        )
+        return
+
+    # Run QA
+    print_info(f"🧪 Starting comprehensive QA for {ethos_url}...")
+
+    client = EthosClient(
+        base_url=ethos_url,
+        username=ethos_user,
+        password=ethos_pw,
+        verify_ssl=cfg.qa.verify_ssl,
+    )
+
+    # Login first
+    try:
+        await client.login()
+        print_info("✓ Authenticated successfully")
+    except Exception as e:
+        print_error(f"Login failed: {e}")
+        return
+
+    findings_count = [0]
+
+    async def on_finding(finding):
+        findings_count[0] += 1
+        icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
+            finding.severity, "⚪"
+        )
+        console.print(
+            f"  {icon} [{finding.severity.upper()}] [{finding.category}] "
+            f"{finding.app}: {finding.title}"
+        )
+
+    runner = QARunner(
+        client=client,
+        project_name=cfg.qa.project_name,
+        on_finding=on_finding,
+    )
+
+    skip = set(cfg.qa.skip_suites)
+    report = await runner.run_all(skip=skip)
+    engine._last_qa_report = report  # type: ignore[attr-defined]
+
+    # Print summary
+    console.print(f"\n{report.summary}")
+
+    # Create tickets
+    if cfg.qa.auto_create_tickets and report.findings:
+        print_info(f"\n📝 Creating {len(report.findings)} ticket(s) in '{cfg.qa.project_name}'...")
+        created = await runner.create_tickets(cfg.qa.project_name)
+        print_info(f"✓ Created {len(created)} ticket(s)")
+    elif report.findings:
+        print_info(
+            f"\n{len(report.findings)} finding(s). "
+            f"Set auto_create_tickets=true to auto-file tickets."
+        )
+    else:
+        print_info("\n✅ No issues found!")
+

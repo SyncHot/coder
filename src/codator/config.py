@@ -118,6 +118,18 @@ class IssueConfig(BaseModel):
     default_labels: list[str] = []
 
 
+class QAConfig(BaseModel):
+    """Configuration for Ethos OS NAS QA testing."""
+    ethos_url: str = ""  # e.g. "https://nas.myserver.pl"
+    ethos_username: str = ""
+    ethos_password: str = ""  # prefer ETHOS_PASSWORD env var
+    verify_ssl: bool = False
+    project_name: str = "Ethos"  # Tickets project name
+    auto_create_tickets: bool = True
+    slow_threshold: float = 5.0  # seconds
+    skip_suites: list[str] = Field(default_factory=list)  # e.g. ["network"]
+
+
 class AppSettings(BaseSettings):
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
@@ -130,6 +142,7 @@ class AppSettings(BaseSettings):
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
     issue: IssueConfig = Field(default_factory=IssueConfig)
+    qa: QAConfig = Field(default_factory=QAConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +193,13 @@ def load_config(path: Path | None = None) -> AppSettings:
         settings.api.claude_api_key = key
     if key := os.environ.get("OPENAI_API_KEY"):
         settings.api.openai_api_key = key
+    # Ethos NAS credentials from env vars
+    if url := os.environ.get("ETHOS_URL"):
+        settings.qa.ethos_url = url
+    if user := os.environ.get("ETHOS_USERNAME"):
+        settings.qa.ethos_username = user
+    if pw := os.environ.get("ETHOS_PASSWORD"):
+        settings.qa.ethos_password = pw
 
     return settings
 

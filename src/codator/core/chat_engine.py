@@ -71,6 +71,7 @@ from codator.infrastructure.tools.network_tool import NetworkTool
 from codator.infrastructure.tools.config_validator_tool import ConfigValidatorTool
 from codator.infrastructure.tools.archive_tool import ArchiveTool
 from codator.infrastructure.tools.hook_tool import HookTool
+from codator.infrastructure.tools.ethos_ticket_tool import EthosTicketTool
 
 logger = logging.getLogger(__name__)
 
@@ -476,6 +477,15 @@ class ChatEngine:
         self._tools.register(ConfigValidatorTool())
         self._tools.register(ArchiveTool())
         self._tools.register(HookTool())
+
+        # Ethos NAS ticket integration
+        if cfg.qa.ethos_url:
+            self._tools.register(EthosTicketTool(
+                base_url=cfg.qa.ethos_url,
+                username=cfg.qa.ethos_username,
+                password=cfg.qa.ethos_password,
+                verify_ssl=cfg.qa.verify_ssl,
+            ))
 
     def _build_system_prompt(self) -> str:
         project_ctx = ""
