@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -45,7 +46,6 @@ def safe_parse_json(raw: str) -> Any:
     # 2. Fix invalid backslash escapes — LLMs often produce \n, \t inside
     #    code blocks that are NOT valid JSON escapes, or Windows-style paths
     #    like C:\Users.  Replace unrecognised \X sequences with \\X.
-    import re
     _VALID_JSON_ESCAPES = frozenset('"\\/bfnrtu')
     def _fix_escapes(s: str) -> str:
         result: list[str] = []
@@ -331,13 +331,37 @@ def _escape_broken_strings(text: str) -> str:
     return "".join(result)
 
 
+_COLLAPSED_STMT_RE = re.compile(
+    r"(?<=[\)\]\}\w])"  # preceded by ), ], }, or word char
+    r"([ ]{4,})"  # 4+ spaces (suggests indent, not single space)
+    r"((?:return|import|from|if|elif|else|for|while|def|class|"
+    r"try|except|finally|raise|with|yield|assert|break|continue|pass)\b)",
+)
+
+
+def _split_collapsed_statements(text: str) -> str:
+    r"""Insert newlines where Python statements are concatenated on one line.
+
+    LLMs sometimes drop the ``\n`` between two statements but keep the
+    indentation whitespace, producing e.g.::
+
+        vtt = x            return Response(vtt)
+
+    This detects ``<code>    <keyword>`` (4+ spaces between code and a
+    Python keyword) and inserts a newline before the indentation block.
+    """
+    return _COLLAPSED_STMT_RE.sub(r"\n\1\2", text)
+
+
 def normalize_edit_text(text: str) -> str:
-    """Apply both newline normalization passes to LLM-generated code.
+    """Apply newline normalization passes to LLM-generated code.
 
     1. ``_unescape_collapsed_code``:  literal ``\\n`` → real newlines outside strings
     2. ``_escape_broken_strings``:    real newlines  → ``\\n`` inside string literals
+    3. ``_split_collapsed_statements``:  detect 4+ space gaps before keywords → newlines
     """
-    return _escape_broken_strings(_unescape_collapsed_code(text))
+    result = _escape_broken_strings(_unescape_collapsed_code(text))
+    return _split_collapsed_statements(result)
 
 
 # ---------------------------------------------------------------------------
@@ -831,7 +855,6 @@ class PlanActVerifyAgent:
         Small models often put descriptions in 'command' or 'task' fields
         instead of action names. This tries to extract a verb and map it.
         """
-        import re
         # Gather all string values from the step
         texts = [v for v in step_dict.values() if isinstance(v, str)]
         combined = " ".join(texts).lower()
@@ -854,7 +877,6 @@ class PlanActVerifyAgent:
     @staticmethod
     def _extract_path_from_step(step_dict: dict) -> str:
         """Try to extract a file path from any field in a step dict."""
-        import re
         for val in step_dict.values():
             if not isinstance(val, str):
                 continue
@@ -962,7 +984,6 @@ class PlanActVerifyAgent:
                 edit_info = safe_parse_json(raw)
             except (json.JSONDecodeError, ValueError):
                 # Last resort: strip control chars and retry
-                import re
                 sanitised = re.sub(
                     r'[\x00-\x1f]',
                     lambda m: f'\\u{ord(m.group()):04x}',
@@ -1108,12 +1129,11 @@ class PlanActVerifyAgent:
             First line matches target but subsequent lines have less →
             add delta to subsequent lines only.
         """
-        import re as _re
 
         if "\n" not in new_text:
             return new_text
 
-        target_indent = _re.match(r"(\s*)", matched_text).group(1)
+        target_indent = re.match(r"(\s*)", matched_text).group(1)
         if not target_indent:
             return new_text  # matched text has no indentation
 
@@ -1123,7 +1143,7 @@ class PlanActVerifyAgent:
             return new_text  # single meaningful line — nothing to align
 
         first_i, first_line = non_empty[0]
-        first_indent = _re.match(r"(\s*)", first_line).group(1)
+        first_indent = re.match(r"(\s*)", first_line).group(1)
 
         if len(first_indent) < len(target_indent):
             # Case A: first line also under-indented — fix all lines
@@ -1135,7 +1155,7 @@ class PlanActVerifyAgent:
         # First line has enough indent — check subsequent lines
         subsequent = non_empty[1:]
         min_sub_indent = min(
-            len(_re.match(r"(\s*)", line).group(1)) for _, line in subsequent
+            len(re.match(r"(\s*)", line).group(1)) for _, line in subsequent
         )
         if min_sub_indent >= len(target_indent):
             return new_text  # all lines already have enough indentation

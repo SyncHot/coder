@@ -8,6 +8,7 @@ from codator.core.agent_loop import (
     PlanActVerifyAgent,
     _unescape_collapsed_code,
     _escape_broken_strings,
+    _split_collapsed_statements,
     normalize_edit_text,
 )
 
@@ -302,3 +303,62 @@ class TestAlignIndentation:
         new = "        if cond:\n    x = 1\nelse:\n    x = 2"
         expected = "        if cond:\n            x = 1\n        else:\n            x = 2"
         assert self._align(matched, new) == expected
+
+
+class TestSplitCollapsedStatements:
+    """Verify _split_collapsed_statements detects concatenated statements."""
+
+    def test_return_after_code(self):
+        """Return on same line after 4+ spaces → split."""
+        text = "            vtt = x            return Response(vtt)"
+        expected = "            vtt = x\n            return Response(vtt)"
+        assert _split_collapsed_statements(text) == expected
+
+    def test_import_after_code(self):
+        """Import concatenated after code → split."""
+        text = "x = func()        import re"
+        expected = "x = func()\n        import re"
+        assert _split_collapsed_statements(text) == expected
+
+    def test_no_split_single_space(self):
+        """Normal single space between tokens → no split."""
+        text = "if x: return y"
+        assert _split_collapsed_statements(text) == text
+
+    def test_no_split_two_spaces(self):
+        """Two spaces between tokens → no split (threshold is 4)."""
+        text = "result = func()  return x"
+        assert _split_collapsed_statements(text) == text
+
+    def test_no_split_keyword_in_identifier(self):
+        """return_value shouldn't trigger split (word boundary)."""
+        text = "x = get_return_value()            done"
+        assert _split_collapsed_statements(text) == text
+
+    def test_multiline_only_affects_concatenated(self):
+        """Properly separated lines stay unchanged."""
+        text = "x = func()\n            return y"
+        assert _split_collapsed_statements(text) == text
+
+    def test_qa_scenario_vtt_return(self):
+        """Real QA scenario: vtt assignment + return on same line."""
+        text = (
+            "            vtt = \"WEBVTT\\n\\n\" + '\\n'.join(vtt)"
+            "            return Response(vtt, mimetype=\"text/vtt\")"
+        )
+        expected = (
+            "            vtt = \"WEBVTT\\n\\n\" + '\\n'.join(vtt)\n"
+            "            return Response(vtt, mimetype=\"text/vtt\")"
+        )
+        assert _split_collapsed_statements(text) == expected
+
+    def test_for_loop_after_code(self):
+        """For loop concatenated → split."""
+        text = "items = []        for x in range(10):"
+        expected = "items = []\n        for x in range(10):"
+        assert _split_collapsed_statements(text) == expected
+
+    def test_preserves_strings_approximately(self):
+        """Spaces inside code near keywords with < 4 spaces → no split."""
+        text = "msg = 'hi return bye'"
+        assert _split_collapsed_statements(text) == text
