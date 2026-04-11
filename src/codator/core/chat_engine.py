@@ -421,28 +421,26 @@ class ChatEngine:
         self._tools.register(LintTool(cwd=self._project_root))
 
         # --- Tier 1: highest-impact tools ---
-        self._tools.register(RefactorTool(cwd=self._project_root))
-        self._tools.register(CoverageTool(cwd=self._project_root))
-        self._tools.register(SecurityScanTool(cwd=self._project_root))
-        self._tools.register(EmbeddingSearchTool(cwd=self._project_root))
-        self._tools.register(EnvironmentTool(cwd=self._project_root))
+        self._tools.register(RefactorTool())
+        self._tools.register(CoverageTool())
+        self._tools.register(SecurityScanTool())
+        self._tools.register(EmbeddingSearchTool())
+        self._tools.register(EnvironmentTool())
 
         # --- Tier 2: high-impact tools ---
-        self._tools.register(ProfilerTool(cwd=self._project_root))
+        self._tools.register(ProfilerTool())
         self._tools.register(MonitorTool())
-        self._tools.register(DiagramTool(cwd=self._project_root))
-        self._tools.register(ReleaseTool(cwd=self._project_root))
-        self._tools.register(BenchmarkTool(cwd=self._project_root))
+        self._tools.register(DiagramTool())
+        self._tools.register(ReleaseTool())
+        self._tools.register(BenchmarkTool())
 
         # --- Tier 3: completeness tools ---
         self._tools.register(LogAnalyzerTool())
         self._tools.register(ScaffoldTool())
         self._tools.register(NetworkTool())
-        self._tools.register(ConfigValidatorTool(cwd=self._project_root))
+        self._tools.register(ConfigValidatorTool())
         self._tools.register(ArchiveTool())
-        self._tools.register(HookTool(
-            db_path=str(Path.home() / '.codator' / 'hooks.json'),
-        ))
+        self._tools.register(HookTool())
 
     def _build_system_prompt(self) -> str:
         project_ctx = ""

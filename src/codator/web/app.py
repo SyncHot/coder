@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
+import logging
+import os as _os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +19,30 @@ if TYPE_CHECKING:
     from codator.core.chat_engine import ChatEngine
 
 _engine: ChatEngine | None = None
+_log = logging.getLogger("codator.web")
+
+_PULL_STATE_FILE = _os.path.expanduser("~/.codator/pull_state.json")
+
+
+def _save_pull_state(model: str):
+    _os.makedirs(_os.path.dirname(_PULL_STATE_FILE), exist_ok=True)
+    with open(_PULL_STATE_FILE, "w") as f:
+        _json.dump({"model": model}, f)
+
+
+def _clear_pull_state():
+    if _os.path.isfile(_PULL_STATE_FILE):
+        _os.remove(_PULL_STATE_FILE)
+
+
+def _get_pending_pull() -> str | None:
+    if _os.path.isfile(_PULL_STATE_FILE):
+        try:
+            with open(_PULL_STATE_FILE) as f:
+                return _json.load(f).get("model")
+        except Exception:
+            pass
+    return None
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
@@ -53,6 +80,41 @@ def create_app(engine: ChatEngine) -> FastAPI:
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     _register_routes(app)
+
+    @app.on_event("startup")
+    async def _resume_pull():
+        """Resume interrupted model pull on server restart."""
+        pending = _get_pending_pull()
+        if not pending:
+            return
+        _log.info(f"Resuming pull of {pending} (interrupted by restart)")
+
+        async def _background_pull():
+            import httpx
+            ollama_url = _engine._settings.ollama.base_url.rstrip("/")
+            try:
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{ollama_url}/api/pull",
+                        json={"name": pending, "stream": True},
+                    ) as resp:
+                        async for line in resp.aiter_lines():
+                            if not line:
+                                continue
+                            try:
+                                obj = _json.loads(line)
+                                if obj.get("status") == "success":
+                                    _log.info(f"Auto-resume: {pending} pulled OK")
+                            except _json.JSONDecodeError:
+                                pass
+                _clear_pull_state()
+                _log.info(f"Auto-resume complete: {pending}")
+            except Exception as e:
+                _log.error(f"Auto-resume pull failed for {pending}: {e}")
+
+        asyncio.create_task(_background_pull())
+
     return app
 
 
@@ -224,6 +286,7 @@ def _register_routes(app: FastAPI):
             )
 
         ollama_url = _engine._settings.ollama.base_url.rstrip("/")
+        _save_pull_state(model)
 
         async def pull_stream():
             try:
@@ -254,6 +317,7 @@ def _register_routes(app: FastAPI):
                                 yield f"data: {payload}\n\n"
                             except json_mod.JSONDecodeError:
                                 pass
+                _clear_pull_state()
                 yield "data: [DONE]\n\n"
             except Exception as exc:
                 err = json_mod.dumps({"error": str(exc)})
@@ -283,9 +347,10 @@ def _register_routes(app: FastAPI):
         ollama_url = _engine._settings.ollama.base_url.rstrip("/")
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.delete(
+                resp = await client.request(
+                    "DELETE",
                     f"{ollama_url}/api/delete",
-                    json={"name": model},
+                    json={"model": model},
                 )
                 if resp.status_code == 200:
                     return {"status": f"Deleted {model}"}
